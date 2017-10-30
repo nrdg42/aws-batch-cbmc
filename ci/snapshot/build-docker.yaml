@@ -1,0 +1,195 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  S3BucketName:
+    Type: String
+
+  BatchCodeCommitRepositoryName:
+    Type: String
+    Default: CBMC-batch
+
+  BatchCodeCommitBranchName:
+    Type: String
+    Default: master
+
+Resources:
+
+  DockerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: cbmc
+      LifecyclePolicy:
+        LifecyclePolicyText: '
+          {
+            "rules": [ {
+              "rulePriority": 10,
+              "description": "remove untagged images except the latest one",
+              "selection": {
+                "tagStatus": "untagged",
+                "countType": "imageCountMoreThan",
+                "countNumber": 1
+              },
+              "action": {
+                "type": "expire"
+              }
+            } ]
+          }'
+
+  BuildDockerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "build-docker-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - ecr:GetAuthorizationToken
+                Effect: Allow
+                Resource: "*"
+              - Action:
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchCheckLayerAvailability
+                Effect: Allow
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/cbmc"
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+              - Action:
+                  - s3:GetObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+
+
+  BuildDockerProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:1.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: REGION
+            Type: PLAINTEXT
+            Value: !Sub "${AWS::Region}"
+          - Name: ACCOUNTID
+            Type: PLAINTEXT
+            Value: !Sub "${AWS::AccountId}"
+      Name: Build-Docker-Project
+      ServiceRole: !Ref BuildDockerRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --storage-driver=overlay2&
+                - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+                - $(aws ecr get-login --region ${REGION} --no-include-email)
+                - export DATE=`date -u +%Y%m%d-%H%M%S`
+                - export COMMIT=`expr substr ${CODEBUILD_RESOLVED_SOURCE_VERSION} 1 8`
+                - >
+                  make -C docker/ubuntu16-gcc
+                  REPO=${ACCOUNTID}.dkr.ecr.${REGION}.amazonaws.com/cbmc
+                  FLAGS="--build-arg UBUNTU_ARCHIVE=${REGION}.ec2.archive.ubuntu.com"
+                  IMAGETAGSUFFIX="-${DATE}-${COMMIT}"
+                - >
+                  make -C docker/ubuntu16-gcc install
+                  REPO=${ACCOUNTID}.dkr.ecr.${REGION}.amazonaws.com/cbmc
+                  IMAGETAGSUFFIX="-${DATE}-${COMMIT}"
+
+  BuildDockerPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "infrastructurepipeline-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${BatchCodeCommitRepositoryName}"
+              - Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Effect: Allow
+                Resource:
+                  - !GetAtt BuildDockerProject.Arn
+              - Action:
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+
+  BuildDockerPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: "Build-Docker-Pipeline"
+      RoleArn: !GetAtt BuildDockerPipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3BucketName
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "Build-Docker-Source"
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: !Ref BatchCodeCommitRepositoryName
+                BranchName: !Ref BatchCodeCommitBranchName
+              OutputArtifacts:
+                - Name: "docker-src"
+        - Name: "Build"
+          Actions:
+            - Name: "Build-Docker-Build"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref BuildDockerProject
+              InputArtifacts:
+                - Name: "docker-src"
+              RunOrder: 1
+
+Outputs:
+  BuildDockerPipeline:
+    Value: !Ref BuildDockerPipeline
+    Export:
+      Name: BuildDockerPipeline

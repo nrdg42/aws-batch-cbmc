@@ -1,0 +1,321 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  ProjectName:
+    Type: String
+
+  SIMAddress:
+    Type: String
+
+  NotificationAddress:
+    Type: String
+
+Resources:
+
+################################################################
+# CloudWatch
+################################################################
+
+################################################################
+# Alarms
+
+  LambdaErrorAlarm:
+    DependsOn: SESLambda
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref SnsLambdaTopic
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: "AWS/Lambda"
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0.0
+      TreatMissingData: notBreaching
+
+  VerificationErrorAlarm:
+    DependsOn: SESLambda
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref SnsVerificationTopic
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: !Ref ProjectName
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0.0
+      TreatMissingData: notBreaching
+
+  VerificationFailureAlarm:
+    DependsOn: SESLambda
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref SnsVerificationTopic
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: Failures
+      Namespace: !Sub "${ProjectName}"
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0.0
+      TreatMissingData: notBreaching
+
+  CanaryAlarm:
+    DependsOn: SESLambda
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref SnsCanaryTopic
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      MetricName: Attempts
+      Namespace: !Ref ProjectName
+      Period: 86400
+      Statistic: Minimum
+      Threshold: 1.0
+      TreatMissingData: breaching
+
+################################################################
+# SNS: Simple Notification Service
+################################################################
+
+################################################################
+# SNS topics
+
+  SnsLambdaTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "CBMC Batch Lambda Failure"
+      TopicName: "cbmc-batch-lambda-failure"
+
+  SnsVerificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${ProjectName} Verification Problem"
+      TopicName: "verification-problem"
+
+  SnsCanaryTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${ProjectName} Canary Failure"
+      TopicName: !Sub "${ProjectName}-canary-failure"
+
+################################################################
+# SNS topic policies
+
+  LambdaEventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sns:Publish
+            Resource: !Ref SnsLambdaTopic
+            Condition:
+              ArnEquals:
+                "aws:SourceArn": !GetAtt LambdaErrorAlarm.Arn
+      Topics:
+        - !Ref SnsLambdaTopic
+
+  VerificationEventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: "Allow-Verification-Error-Alarm"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sns:Publish
+            Resource: !Ref SnsVerificationTopic
+            Condition:
+              ArnEquals:
+                "aws:SourceArn": !GetAtt VerificationErrorAlarm.Arn
+          - Sid: "Allow-Verification-Failure-Alarm"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sns:Publish
+            Resource: !Ref SnsVerificationTopic
+            Condition:
+              ArnEquals:
+                "aws:SourceArn": !GetAtt VerificationFailureAlarm.Arn
+      Topics:
+        - !Ref SnsVerificationTopic
+
+  CanaryEventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sns:Publish
+            Resource: !Ref SnsCanaryTopic
+            Condition:
+              ArnEquals:
+                "aws:SourceArn": !GetAtt CanaryAlarm.Arn
+      Topics:
+        - !Ref SnsCanaryTopic
+
+################################################################
+# SNS subscriptions
+
+  SnsLambdaSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt SESLambda.Arn
+      Protocol: lambda
+      TopicArn: !Ref SnsLambdaTopic
+
+  SnsVerificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt SESLambda.Arn
+      Protocol: lambda
+      TopicArn: !Ref SnsVerificationTopic
+
+  SnsCanarySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt SESLambda.Arn
+      Protocol: lambda
+      TopicArn: !Ref SnsCanaryTopic
+
+################################################################
+# SES: Simple Email Service
+################################################################
+
+# TODO: The SESLambdaRole and SESLambda are identical in
+# alarms-build and alarms-prod and could be included from
+# a shared template stored on S3.
+
+################################################################
+# SES lambda
+
+  SESLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "ses-lambda-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+              - Action:
+                  - ses:SendEmail
+                Effect: Allow
+                Resource: "*"
+
+  SESLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt SESLambdaRole.Arn
+      Runtime: python2.7
+      Timeout: 60
+      MemorySize: 128
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import json
+          import os
+          import traceback
+
+          SENDER = '${NotificationAddress}'
+          TO = '${SIMAddress}'
+
+          def lambda_handler(event, context):
+            ses = boto3.client('ses', region_name=os.environ['AWS_REGION'])
+            try:
+              subject = event['Records'][0]['Sns']['Subject']
+              if not subject:
+                subject = 'Pipeline error in ${AWS::AccountId}'
+              message = json.loads(event['Records'][0]['Sns']['Message'])
+              body = json.dumps(message, sort_keys=True, indent=2)
+              ses.send_email(
+                Source=SENDER,
+                Destination={'ToAddresses': [TO]},
+                Message={
+                  'Subject': {'Data': '${ProjectName} ' + subject},
+                  'Body': {
+                    'Text': {'Data': body},
+                    'Html': {
+                      'Data': '<html><head></head><body>{}</body></html>'.format(
+                        body.replace('\n', '<br>'))
+                    }
+                  }
+                })
+
+            except Exception as e:
+              traceback.print_exc()
+              print 'Error: ' + str(e)
+              print 'Event: ' + str(event)
+              ses.send_email(
+                Source=SENDER,
+                Destination={'ToAddresses': [TO]},
+                Message={
+                  'Subject': {'Data': 'SES Lambda ${AWS::AccountId} failed'},
+                  'Body': {
+                    'Text': {'Data': str(e)},
+
+
+                    'Html': {
+                      'Data': '<html><head></head><body>{}</body></html>'.format(e)
+                    }
+                  }
+                })
+
+################################################################
+# Lambda
+################################################################
+
+################################################################
+# Lambda permissions
+
+  SnsLambdaSESLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SnsLambdaTopic
+      FunctionName: !GetAtt SESLambda.Arn
+
+  SnsVerificationSESLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SnsVerificationTopic
+      FunctionName: !GetAtt SESLambda.Arn
+
+  SnsCanarySESLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SnsCanaryTopic
+      FunctionName: !GetAtt SESLambda.Arn
+

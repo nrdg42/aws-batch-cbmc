@@ -1,0 +1,42 @@
+From 0213046a69c150d3d68b783cdd98c21266c0b6b7 Mon Sep 17 00:00:00 2001
+From: Tuttle <mrtuttle@amazon.com>
+Date: Sat, 24 Feb 2018 08:15:48 -0500
+Subject: [PATCH] Added a flush on output in cout_message_handlert
+
+---
+ src/util/cout_message.cpp | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/util/cout_message.cpp b/src/util/cout_message.cpp
+index 582c068..7fda54f 100644
+--- a/src/util/cout_message.cpp
++++ b/src/util/cout_message.cpp
+@@ -108,10 +108,10 @@ void console_message_handlert::print(
+ 
+     if(level>=4)
+     {
+-      std::cout << message << '\n';
++      std::cout << message << '\n' << std::flush;
+     }
+     else
+-      std::cerr << message << '\n';
++      std::cerr << message << '\n' << std::flush;
+   }
+   #else
+   // Messages level 3 or lower go to cerr, messages level 4 or
+@@ -119,10 +119,10 @@ void console_message_handlert::print(
+ 
+   if(level>=4)
+   {
+-    std::cout << message << '\n';
++    std::cout << message << '\n' << std::flush;
+   }
+   else
+-    std::cerr << message << '\n';
++    std::cerr << message << '\n' << std::flush;
+   #endif
+ }
+ 
+-- 
+1.9.1
+

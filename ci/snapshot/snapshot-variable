@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+#pylint: disable=missing-docstring,invalid-name
+
+import logging
+import argparse
+
+import botocore_amazon.monkeypatch
+import boto3
+
+################################################################
+# Argument parsing
+
+def create_parser():
+    arg = argparse.ArgumentParser(
+        description='Set or get environment variables of AWS resources.')
+
+    arg.add_argument('--profile',
+                     metavar='PROFILE',
+                     help='AWS account profile.'
+                    )
+    arg.add_argument('--set',
+                     metavar='VAR',
+                     help='Variable name to set.'
+                    )
+    arg.add_argument('--get',
+                     metavar='VAR',
+                     help='Variable name to get.'
+                    )
+    arg.add_argument('--value',
+                     metavar='VAL',
+                     help='Value to set.'
+                    )
+    arg.add_argument('--list',
+                     action='store_true',
+                     help='List environment variables.'
+                    )
+    arg.add_argument('--lambda',
+                     dest='lmbda',
+                     metavar='NAME',
+                     help='Name of lambda with variable to set of get.'
+                    )
+    arg.add_argument('--codebuild',
+                     metavar='NAME',
+                     help='Name of codebuild with variable to set of get.'
+                    )
+
+    arg.add_argument('--operational',
+                     dest='operational',
+                     default=None,
+                     action='store_true',
+                     help='Make continuous integration operational')
+    arg.add_argument('--not-operational',
+                     dest='operational',
+                     action='store_false',
+                     help='Make continuous integration inoperative')
+    arg.add_argument('--updating',
+                     dest='updating',
+                     default=None,
+                     action='store_true',
+                     help='Make continuous integration update GitHub status.')
+    arg.add_argument('--not-updating',
+                     dest='updating',
+                     action='store_false',
+                     help='Make continuous integration stop updating GitHub status.')
+    arg.add_argument('--show-status',
+                     action='store_true',
+                     help='Show operational and updating status.'
+                     )
+
+    arg.add_argument('--verbose',
+                     action='store_true',
+                     help='Verbose output.'
+                    )
+    arg.add_argument('--debug',
+                     action='store_true',
+                     help='Debug output.'
+                    )
+
+    return arg
+
+def parse_args():
+    args = create_parser().parse_args()
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO)
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+    logging.debug('Command line arguments: %s', args)
+
+    return args
+
+################################################################
+
+def is_substring(str1, str2):
+    return str1.lower() in str2.lower()
+
+def find_string_match(string, strings):
+    matches = [str for str in strings if is_substring(string, str)]
+    if len(matches) == 1:
+        return matches[0]
+    logging.info("No single match for %s in %s: Found matches %s",
+                 string, strings, matches)
+    return None
+
+################################################################
+
+def abort(string):
+    logging.info(string)
+    raise UserWarning(string)
+
+################################################################
+
+def full_name(items, name, name_key='name'):
+    names = [item[name_key] for item in items
+             if name.lower() in item[name_key].lower()]
+    if len(names) == 1:
+        return names[0]
+    abort("No single name containing {} in {}: Found {}"
+          .format(name, [item[name_key] for item in items], names))
+    return None #pylint
+
+def get_value(items, name, name_key='name', value_key='value'):
+    vrs = [item for item in items if name == item[name_key]]
+    if len(vrs) == 1:
+        return vrs[0][value_key]
+    abort("Can't find {} in {}"
+          .format(name, [item[name_key] for item in items]))
+    return None #pylint
+
+def set_value(items, name, value, name_key='name', value_key='value'):
+    found = 0
+    new = []
+    for item in items:
+        if item[name_key] == name:
+            item[value_key] = value
+            found = found + 1
+        new.append(item)
+    if found == 1:
+        return new
+    abort("Can't find {} in {}"
+          .format(name, [item[name_key] for item in items]))
+    return None #pylint
+
+def list_values(items, name_key='name', value_key='value'):
+    return [(item[name_key], item[value_key]) for item in items]
+
+################################################################
+
+# keys allowed by cbd.update_project.
+# cbd.batch_get_projects returns more information than required
+
+CODEBUILD_KEYS = [
+    'name',
+    'description',
+    'source',
+    'secondarySources',
+    'artifacts',
+    'secondaryArtifacts',
+    'cache',
+    'environment',
+    'serviceRole',
+    'timeoutInMinutes',
+    'queuedTimeoutInMinutes',
+    'encryptionKey',
+    'tags',
+    'vpcConfig',
+    'badgeEnabled',
+    'logsConfig'
+]
+
+def codebuild_fullname(cbd, project):
+    names = cbd.list_projects()['projects']
+    name = find_string_match(project, names)
+    if not name:
+        abort("No single project with name {} in {}".format(project, names))
+    return name
+
+def codebuild_get_variables(cbd, project):
+    projects = cbd.batch_get_projects(names=[project])['projects']
+    if len(projects) != 1:
+        abort("No single project named {}: Found matches {}"
+              .format(project, [proj['name'] for proj in projects]))
+    return projects[0]['environment']['environmentVariables']
+
+def codebuild_set_variables(cbd, project, variables):
+    projects = cbd.batch_get_projects(names=[project])['projects']
+    if len(projects) != 1:
+        abort("No single project named {}: Found matches {}"
+              .format(project, [proj['name'] for proj in projects]))
+    update = projects[0]
+    for key in list(update.keys()):
+        if key not in CODEBUILD_KEYS:
+            del update[key]
+    update['environment']['environmentVariables'] = variables
+    cbd.update_project(**update)
+
+def codebuild_getenv(cbd, project, name):
+    proj_name = codebuild_fullname(cbd, project)
+    variables = codebuild_get_variables(cbd, proj_name)
+    var_name = full_name(variables, name)
+    return (var_name, get_value(variables, var_name))
+
+def codebuild_setenv(cbd, project, name, value):
+    proj_name = codebuild_fullname(cbd, project)
+    variables = codebuild_get_variables(cbd, proj_name)
+    var_name = full_name(variables, name)
+    variables = set_value(variables, var_name, value)
+    codebuild_set_variables(cbd, proj_name, variables)
+
+def codebuild_listenv(cbd, project):
+    proj_name = codebuild_fullname(cbd, project)
+    variables = codebuild_get_variables(cbd, proj_name)
+    return [(var['name'], var['value']) for var in variables]
+
+################################################################
+
+# keys allowed by lda.update_function_configuration.
+# lda.get_function_configuration returns more information than required
+
+LAMBDA_KEYS = [
+    'FunctionName',
+    'Role',
+    'Handler',
+    'Description',
+    'Timeout',
+    'MemorySize',
+    'VpcConfig',
+    'Environment',
+    'Runtime',
+    'DeadLetterConfig',
+    'KMSKeyArn',
+    'TracingConfig',
+    'RevisionId',
+    'Layers'
+]
+
+LAMBDA_VPCCONFIG_KEYS = [
+    'SubnetIds',
+    'SecurityGroupIds'
+]
+
+def lambda_function_name(lda, function):
+    """Return function name containing 'function' (case insensitive)"""
+    names = [fnc['FunctionName'] for fnc in lda.list_functions()['Functions']]
+    name = find_string_match(function, names)
+    if name is None:
+        abort("No single function with name {} in {}".format(function, names))
+    return name
+
+def lambda_variable_name(variables, var):
+    """Return variable name containing 'var' (case insensitive)"""
+    names = list(variables.keys())
+    name = find_string_match(var, names)
+    if name is None:
+        abort("No single variable with name {} in {}".format(var, names))
+    return name
+
+def lambda_get_variables(lda, function):
+    cfg = lda.get_function_configuration(FunctionName=function)
+    return cfg['Environment']['Variables']
+
+def lambda_set_variables(lda, function, variables):
+    cfg = lda.get_function_configuration(FunctionName=function)
+    for key in list(cfg.keys()):
+        if key not in LAMBDA_KEYS:
+            del cfg[key]
+    for key in list(cfg['VpcConfig'].keys()):
+        if key not in LAMBDA_VPCCONFIG_KEYS:
+            del cfg['VpcConfig'][key]
+    cfg['Environment']['Variables'] = variables
+    lda.update_function_configuration(**cfg)
+
+def lambda_getenv(lda, function, name):
+    lam_name = lambda_function_name(lda, function)
+    variables = lambda_get_variables(lda, lam_name)
+    var_name = lambda_variable_name(variables, name)
+    return (var_name, variables[var_name])
+
+def lambda_setenv(lda, function, name, value):
+    lam_name = lambda_function_name(lda, function)
+    variables = lambda_get_variables(lda, lam_name)
+    var_name = lambda_variable_name(variables, name)
+    variables[var_name] = value
+    lambda_set_variables(lda, lam_name, variables)
+
+def lambda_listenv(lda, function):
+    lam_name = lambda_function_name(lda, function)
+    variables = lambda_get_variables(lda, lam_name)
+    return sorted([(name, value) for name, value in variables.items()])
+
+################################################################
+
+def main():
+    args = parse_args()
+    session = boto3.session.Session(profile_name=args.profile)
+    accountid = session.client('sts').get_caller_identity()['Account']
+
+    cbd = session.client('codebuild')
+    lda = session.client('lambda')
+
+    if args.show_status:
+        name, value = lambda_getenv(lda, 'webhook', 'ci_operational')
+        print('{} = {}'.format(name, value))
+        name, value = lambda_getenv(lda, 'batchstatus', 'ci_updating_status')
+        print('{} = {}'.format(name, value))
+        name, value = codebuild_getenv(cbd, 'prepare', 'ci_updating_status')
+        print('{} = {}'.format(name, value))
+        return
+
+    if args.operational is not None:
+        if args.operational:
+            lambda_setenv(lda, 'webhook', 'ci_operational', 'TRUE')
+            print('Continuous integration set to operating.')
+        else:
+            lambda_setenv(lda, 'webhook', 'ci_operational', 'FALSE')
+            print('Continuous integration set to not operating.')
+        return
+
+    if args.updating is not None:
+        if args.updating:
+            lambda_setenv(lda, 'batchstatus', 'ci_updating_status', 'TRUE')
+            codebuild_setenv(cbd, 'prepare', 'ci_updating_status', 'TRUE')
+            print('Continuous integration set to updating GitHub status.')
+        else:
+            lambda_setenv(lda, 'batchstatus', 'ci_updating_status', 'FALSE')
+            codebuild_setenv(cbd, 'prepare', 'ci_updating_status', 'FALSE')
+            print('Continuous integration set to not updating GitHub status.')
+        return
+
+
+    if args.codebuild:
+        if args.get:
+            name, value = codebuild_getenv(cbd, args.codebuild, args.get)
+            print("{}: {}".format(name, value))
+            return
+        if args.set:
+            codebuild_setenv(cbd, args.codebuild, args.set, args.value)
+            return
+        if args.list:
+            for name, value in sorted(codebuild_listenv(cbd, args.codebuild)):
+                print("{}: {}".format(name, value))
+            return
+
+    if args.lmbda:
+        if args.get:
+            name, value = lambda_getenv(lda, args.lmbda, args.get)
+            print("{}: {}".format(name, value))
+            return
+        if args.set:
+            lambda_setenv(lda, args.lmbda, args.set, args.value)
+            return
+        if args.list:
+            for name, value in sorted(lambda_listenv(lda, args.lmbda)):
+                print("{}: {}".format(name, value))
+            return
+
+if __name__ == '__main__':
+    main()

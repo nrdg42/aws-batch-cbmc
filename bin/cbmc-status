@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Monitor the status of CBMC jobs running under AWS Batch.
+"""
+
+import sys
+
+from batch import Batch
+import status
+import options
+
+################################################################
+
+def abort(msg):
+    """Abort CBMC job monitoring"""
+
+    print("CBMC status monitoring failed: {}".format(msg))
+    sys.exit(1)
+
+################################################################
+
+def main():
+    """
+    Monitor the status of CBMC jobs running under AWS Batch.
+    """
+
+    opts = options.status_options()
+    if opts['jobid'] is None and opts['jobname'] is None:
+        abort("One of --jobid and --jobname is required.")
+
+    batch = Batch(queuename=opts['jobqueue'], region=opts['region'])
+
+    if opts['monitor']:
+        status.monitor_status(batch, opts['jobname'], opts['jobid'])
+    else:
+        status.current_status(batch, opts['jobname'], opts['jobid'])
+
+################################################################
+
+if __name__ == "__main__":
+    main()

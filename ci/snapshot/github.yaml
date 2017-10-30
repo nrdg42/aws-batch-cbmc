@@ -1,0 +1,463 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  S3BucketName:
+    Type: String
+
+  ProjectName:
+    Type: String
+
+  SnapshotID:
+    Type: String
+
+  GitHubRepository:
+    Type: String
+
+  GitHubBranchName:
+    Type: String
+    Default: ""
+
+Resources:
+
+  BatchLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "batch-lambda-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+              - Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource: !Sub "arn:aws:s3:::${S3BucketName}"
+              - Action:
+                  - batch:DescribeJobQueues
+                  - batch:DescribeJobDefinitions
+                  - batch:SubmitJob
+                  - batch:ListJobs
+                Effect: Allow
+                Resource: "*"
+              - Action:
+                  - secretsmanager:GetSecretValue
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:GitHubSecret-??????"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:GitHubCommitStatusPAT-??????"
+              - Action:
+                  - cloudwatch:PutMetricData
+                Effect: Allow
+                Resource: "*"
+              - Action:
+                  - codebuild:StartBuild
+                Effect: Allow
+                Resource: "*"
+
+
+  InvokeBatchLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: !Sub "snapshot/snapshot-${SnapshotID}/lambda.zip"
+      Handler: cbmc_ci_start.lambda_handler
+      Role: !GetAtt BatchLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      MemorySize: 512
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          S3_BKT: !Ref S3BucketName
+          PKG_BKT: !Sub "${S3BucketName}/snapshot/snapshot-${SnapshotID}"
+
+  BatchStatusLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref S3BucketName
+        S3Key: !Sub "snapshot/snapshot-${SnapshotID}/lambda.zip"
+      Handler: cbmc_ci_end.lambda_handler
+      Role: !GetAtt BatchLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          S3_BKT: !Ref S3BucketName
+          PKG_BKT: !Sub "${S3BucketName}/snapshot/snapshot-${SnapshotID}"
+          CBMC_CI_UPDATING_STATUS: True
+
+  BatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Batch state change rule"
+      EventPattern:
+        source:
+          - aws.batch
+        detail-type:
+          - "Batch Job State Change"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt BatchStatusLambda.Arn
+          Id: "BatchStateChange"
+
+  BatchEventPolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BatchStatusLambda
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BatchEventRule.Arn
+
+  WebhookLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "webhook-lambda-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+              - Action:
+                  - secretsmanager:GetSecretValue
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:GitHubSecret-??????"
+              - Action:
+                  - lambda:InvokeFunction
+                Effect: Allow
+                Resource: !GetAtt InvokeBatchLambda.Arn
+              - Action:
+                  - cloudwatch:PutMetricData
+                Effect: Allow
+                Resource: "*"
+
+  HandleWebhookLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt WebhookLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          CBMC_CI_OPERATIONAL: True
+      Code:
+        ZipFile: !Sub |
+          import os
+          import hashlib
+          import hmac
+          import json
+          import traceback
+          from pprint import pprint
+
+          import boto3
+
+          def get_github_secret():
+              """Get plaintext for key used by GitHub to compute HMAC"""
+              sm = boto3.client('secretsmanager')
+              s = sm.get_secret_value(SecretId='GitHubSecret')
+              return str(json.loads(s['SecretString'])[0]['Secret'])
+
+          def check_hmac(github_signature, payload):
+              """
+              Check HMAC as suggested here:
+              https://developer.github.com/webhooks/securing/
+              """
+              h = hmac.new(get_github_secret().encode(), payload.encode(), hashlib.sha1)
+              signature = 'sha1=' + h.hexdigest()
+              return hmac.compare_digest(signature, github_signature)
+
+          def print_summary(event, response):
+              statusCode = response['statusCode']
+              summary = {}
+              summary['function'] = "HandleWebhookLambda"
+              summary['orig_aws_request_id'] = event['orig_aws_request_id']
+              summary['status'] = "OK" if (statusCode >= 200 and statusCode <= 299) else "FAILED"
+              summary['statusCode'] = statusCode
+              summary['event'] = event
+              summary['response'] = response
+              print(json.dumps(summary))
+
+          def lambda_handler(event, context):
+              print("event = ")
+              print(json.dumps(event))
+              print("context = ")
+              pprint(context)
+
+              running = os.environ.get('CBMC_CI_OPERATIONAL')
+              if not (running and running.strip().lower() == 'true'):
+                 print("Ignoring GitHub event: CBMC CI is not running")
+                 return {'statusCode': 200}
+
+              response = {}
+              try:
+                  event['headers'] = {k.lower(): v
+                                      for k, v in event['headers'].items()}
+                  event['orig_aws_request_id'] = context.aws_request_id
+                  if not check_hmac(
+                          str(event['headers']['x-hub-signature']),
+                          str(event['body'])):
+                      response['statusCode'] = 403
+                  elif event['headers']['x-github-event'] == 'ping':
+                      response['body'] = 'pong'
+                      response['statusCode'] = 200
+                  else:
+                      lc = boto3.client('lambda')
+                      result = lc.invoke(
+                          FunctionName='${InvokeBatchLambda}',
+                          Payload=json.dumps(event))
+                      response['statusCode'] = result['StatusCode']
+              except Exception as e:
+                  response['statusCode'] = 500
+                  traceback.print_exc()
+                  print('Error: ' + str(e))
+                  # raise e
+
+              print("response = ")
+              print(json.dumps(response))
+              print_summary(event, response)
+              return response
+
+  GitHubLambdaAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: "LambdaAPI"
+      Description: "API provided to GitHub"
+
+  GitHubLambdaAPIRootResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt GitHubLambdaAPI.RootResourceId
+      RestApiId: !Ref GitHubLambdaAPI
+      PathPart: "dummy"
+
+  GitHubLambdaAPIResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref GitHubLambdaAPIRootResource
+      RestApiId: !Ref GitHubLambdaAPI
+      PathPart: "{proxy+}"
+
+  GitHubLambdaAPIRootRequest:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      ResourceId: !GetAtt GitHubLambdaAPI.RootResourceId
+      RestApiId: !Ref GitHubLambdaAPI
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Join [ "", [ !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/", !GetAtt HandleWebhookLambda.Arn, "/invocations" ] ]
+
+  GitHubLambdaAPIRequest:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      ResourceId: !Ref GitHubLambdaAPIResource
+      RestApiId: !Ref GitHubLambdaAPI
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Join [ "", [ !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/", !GetAtt HandleWebhookLambda.Arn, "/invocations" ] ]
+
+  GitHubLambdaAPIDeployment:
+    DependsOn: GitHubLambdaAPIRootRequest
+    DependsOn: GitHubLambdaAPIRequest
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref GitHubLambdaAPI
+      StageName: "verify"
+
+  ApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt HandleWebhookLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join [ "", [ !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:", !Ref GitHubLambdaAPI, "/*" ] ]
+
+  GitHubLambdaAPILoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "apigatewaylogging-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                Effect: Allow
+                Resource: "*"
+
+
+  PrepareSourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "PrepareSource-CodeBuild-Policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+              - Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource: !Sub "arn:aws:s3:::${S3BucketName}"
+              - Action:
+                  - secretsmanager:GetSecretValue
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:GitHubSecret-??????"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:GitHubCommitStatusPAT-??????"
+              - Action:
+                  - cloudwatch:PutMetricData
+                Effect: Allow
+                Resource: "*"
+              - Action:
+                  - lambda:InvokeFunction
+                Effect: Allow
+                Resource: !GetAtt BatchStatusLambda.Arn
+              - Action:
+                  - batch:DescribeJobQueues
+                  - batch:DescribeJobDefinitions
+                  - batch:SubmitJob
+                  - batch:ListJobs
+                Effect: Allow
+                Resource: "*"
+
+  PrepareSourceProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/python:3.7.1
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref S3BucketName
+          - Name: S3_BKT
+            Type: PLAINTEXT
+            Value: !Ref S3BucketName
+          - Name: S3_PKG_PATH
+            Type: PLAINTEXT
+            Value: !Sub "snapshot/snapshot-${SnapshotID}"
+          - Name: S3_TAR_PATH
+            Type: PLAINTEXT
+            Value: ""
+          - Name: CBMC_REPOSITORY
+            Type: PLAINTEXT
+            Value: !Sub "https://github.com/${GitHubRepository}"
+          - Name: CBMC_BRANCH
+            Type: PLAINTEXT
+            Value: !Ref GitHubBranchName
+          - Name: CBMC_SHA
+            Type: PLAINTEXT
+            Value: ""
+          - Name: CBMC_IS_DRAFT
+            Type: PLAINTEXT
+            Value: ""
+          - Name: CBMC_ID
+            Type: PLAINTEXT
+            Value: ""
+          - Name: PROJECT_NAME
+            Type: PLAINTEXT
+            Value: !Ref ProjectName
+          - Name: CBMC_CI_UPDATING_STATUS
+            Type: PLAINTEXT
+            Value: "True"
+      Name: "Prepare-Source-Project"
+      ServiceRole: !Ref PrepareSourceRole
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo pip install boto3 future
+                - pip install boto3 future
+                - echo aws s3 cp s3://$S3_BUCKET/$S3_PKG_PATH/lambda.zip lambda.zip
+                - aws s3 cp s3://$S3_BUCKET/$S3_PKG_PATH/lambda.zip lambda.zip
+                - echo unzip -q lambda.zip
+                - unzip -q lambda.zip
+            build:
+              commands:
+                - python prepare_source.py
+
+Outputs:
+
+  GitHubLambdaAPI:
+    Value: !Ref GitHubLambdaAPI
+    Export:
+      Name: GitHubLambdaAPI

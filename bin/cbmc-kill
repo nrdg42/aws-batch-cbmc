@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Kill jobs being run by cbmc-batch on AWS."""
+
+import batch
+import options
+
+def main():
+    """Kill cmbc-batch jobs running on AWS."""
+
+    opts = options.kill_options()
+    bch = batch.Batch(queuename=opts['jobqueue'], region=opts['region'])
+    bch.kill_job(jobid=opts['jobid'], jobname=opts['jobname'])
+
+if __name__ == "__main__":
+    main()

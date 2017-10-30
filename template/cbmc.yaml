@@ -1,0 +1,228 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation Template for CBMC
+
+Parameters:
+  ImageTagSuffix:
+    Type: String
+    Default: ""
+    Description: "A suffix for the container image tag indicating an image version"
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 Security Group for instances launched in the VPC by Batch
+      VpcId: !Ref VPC
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-west-2a
+      CidrBlock: 10.0.0.0/24
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: 'True'
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-west-2b
+      CidrBlock: 10.0.1.0/24
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: 'True'
+
+  SubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: us-west-2c
+      CidrBlock: 10.0.2.0/24
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: 'True'
+
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref SubnetA
+
+  SubnetRouteTableAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref SubnetB
+
+  SubnetRouteTableAssociationC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref SubnetC
+
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: batch.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - Ref: EcsInstanceRole
+
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Policies:
+        - PolicyName: !Sub "cbmc-batch-metrics-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - cloudwatch:PutMetricData
+                Effect: Allow
+                Resource: "*"
+
+  Ubuntu14GccJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: CBMCJobUbuntu14Gcc
+      Type: container
+      ContainerProperties:
+        JobRoleArn: !Ref EcsTaskRole
+        Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cbmc:ubuntu14-gcc${ImageTagSuffix}
+        Vcpus: 2
+        Memory: 16000
+      RetryStrategy:
+        Attempts: 1
+
+  Ubuntu16GccJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: CBMCJobUbuntu16Gcc
+      Type: container
+      ContainerProperties:
+        JobRoleArn: !Ref EcsTaskRole
+        Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cbmc:ubuntu16-gcc${ImageTagSuffix}
+        Vcpus: 2
+        Memory: 16000
+      RetryStrategy:
+        Attempts: 1
+
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: CBMCJobQueue
+      Priority: 1
+      ComputeEnvironmentOrder:
+      - Order: 1
+        ComputeEnvironment: !Ref CBMCComputeEnvironmentWithTemplate3
+
+  # Rename compute environment and launch template by incrementing the last number if you change either one.
+  ComputeEnvironmentLaunchTemplate3:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          -   DeviceName: /dev/xvdcz
+              Ebs:
+                DeleteOnTermination: True
+                Iops: 15000
+                VolumeSize: 300
+                VolumeType: io1
+      LaunchTemplateName: ComputeEnvironmentLaunchTemplate3
+
+  CBMCComputeEnvironmentWithTemplate3:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: CBMCComputeEnvironmentWithTemplate3
+      Type: MANAGED
+      ComputeResources:
+        Type: EC2
+        MinvCpus: 0
+        DesiredvCpus: 8
+        MaxvCpus: 160
+        InstanceTypes:
+        - r4.2xlarge
+        Subnets:
+        - Ref: SubnetA
+        - Ref: SubnetB
+        - Ref: SubnetC
+        SecurityGroupIds:
+        - Ref: SecurityGroup
+        InstanceRole: !Ref EcsInstanceProfile
+        LaunchTemplate:
+          LaunchTemplateId: !Ref ComputeEnvironmentLaunchTemplate3
+          Version: !GetAtt ComputeEnvironmentLaunchTemplate3.LatestVersionNumber
+      ServiceRole: !Ref BatchServiceRole
+
+Outputs:
+  ComputeEnvironmentArn:
+    Value: !Ref CBMCComputeEnvironmentWithTemplate3
+  JobQueueArn:
+    Value: !Ref JobQueue
+  Ubuntu14GccJobDefinitionArn:
+    Value: !Ref Ubuntu14GccJobDefinition
+  Ubuntu16GccJobDefinitionArn:
+    Value: !Ref Ubuntu16GccJobDefinition
+
