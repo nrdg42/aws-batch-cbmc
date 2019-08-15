@@ -1,0 +1,156 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  S3BucketName:
+    Type: String
+
+  ViewerCodeCommitRepositoryName:
+    Type: String
+    Default: CBMC-coverage
+
+  ViewerCodeCommitBranchName:
+    Type: String
+    Default: master
+
+Resources:
+  BuildViewerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "Viewer-CodeBuild-Policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+              - Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource: !Sub "arn:aws:s3:::${S3BucketName}"
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+
+  BuildViewerProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:1.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref S3BucketName
+      Name: "Build-Viewer-Project"
+      ServiceRole: !Ref BuildViewerRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - mkdir /tmp/cbmc-viewer
+                - mv * /tmp/cbmc-viewer/
+                - mv /tmp/cbmc-viewer .
+                - tar czf cbmc-viewer.tar.gz cbmc-viewer
+                - export DATE=`date -u +%Y%m%d-%H%M%S`
+                - export COMMIT=`expr substr ${CODEBUILD_RESOLVED_SOURCE_VERSION} 1 8`
+                - >
+                  aws s3 cp cbmc-viewer.tar.gz
+                  "s3://$S3_BUCKET/package/viewer/cbmc-viewer-$DATE-$COMMIT.tar.gz"
+
+  BuildViewerPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "Viewer-Pipeline-Policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${ViewerCodeCommitRepositoryName}"
+              - Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Effect: Allow
+                Resource:
+                  - !GetAtt BuildViewerProject.Arn
+              - Action:
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+
+  BuildViewerPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: "Build-Viewer-Pipeline"
+      RoleArn: !GetAtt BuildViewerPipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3BucketName
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "Build-Viewer-Source-Action"
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: !Ref ViewerCodeCommitRepositoryName
+                BranchName: !Ref ViewerCodeCommitBranchName
+              OutputArtifacts:
+                - Name: "viewer-src"
+        - Name: "Build"
+          Actions:
+            - Name: "Build-Viewer-Build-Action"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref BuildViewerProject
+              InputArtifacts:
+                - Name: "viewer-src"
+              RunOrder: 1
+
+Outputs:
+  BuildViewerPipeline:
+    Value: !Ref BuildViewerPipeline
+    Export:
+      Name: BuildViewerPipeline

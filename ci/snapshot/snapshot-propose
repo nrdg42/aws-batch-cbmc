@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+#pylint: disable=missing-docstring,invalid-name
+
+import enum
+import logging
+import sys
+import json
+import argparse
+
+import botocore_amazon.monkeypatch
+import boto3
+
+################################################################
+
+class Tool(enum.Enum):
+    """The tools"""
+    cbmc = enum.auto()
+    batch = enum.auto()
+    viewer = enum.auto()
+
+class Pkg(enum.Enum):
+    """The packages built from the tools"""
+    cbmc = enum.auto()
+    batch = enum.auto()
+    viewer = enum.auto()
+    template = enum.auto()
+    docker = enum.auto()
+    lambd = enum.auto()
+
+class Act(enum.Enum):
+    """The accounts used to propose a snapshot"""
+    build = enum.auto()
+    beta = enum.auto()
+    prod = enum.auto()
+
+################################################################
+# Argument parsing
+
+def create_parser():
+    arg = argparse.ArgumentParser(description="""
+    Propose a snapshot configuration file.
+    """)
+
+    arg.add_argument('--profile',
+                     metavar='PROFILE',
+                     help='The AWS account profile (the default for beta, prod, build).'
+                    )
+    arg.add_argument('--beta-profile',
+                     metavar='PROFILE',
+                     help='The AWS account profile for the beta account.'
+                    )
+    arg.add_argument('--prod-profile',
+                     metavar='PROFILE',
+                     help='The AWS account profile for the prod account.'
+                    )
+    arg.add_argument('--build-profile',
+                     metavar='PROFILE',
+                     help="""
+                     The AWS account profile for the build account
+                     (defaults to prod account)."""
+                    )
+
+    arg.add_argument('--cbmc-sha',
+                     metavar='SHA',
+                     help='SHA of the CBMC commit to use.'
+                    )
+    arg.add_argument('--batch-sha',
+                     metavar='SHA',
+                     help='SHA of the CBMC Batch commit to use.'
+                    )
+    arg.add_argument('--viewer-sha',
+                     metavar='SHA',
+                     help='SHA of the CBMC Viewer commit to use.'
+                    )
+
+    arg.add_argument('--no-cbmc-update',
+                     action='store_true',
+                     help='Do not update the cbmc package.'
+                    )
+    arg.add_argument('--no-batch-update',
+                     action='store_true',
+                     help='Do not update the batch packages (including docker).'
+                    )
+    arg.add_argument('--no-viewer-update',
+                     action='store_true',
+                     help='Do not update the viewer package.'
+                    )
+    arg.add_argument('--no-docker-update',
+                     action='store_true',
+                     help='Do not update the docker image.'
+                    )
+    arg.add_argument('--only-batch-update',
+                     action='store_true',
+                     help='Update only the batch packages (but not docker).'
+                    )
+
+    arg.add_argument('--initial',
+                     action='store_true',
+                     help='Propose an initial file'
+                    )
+    arg.add_argument('--show-current-snapshot',
+                     action='store_true',
+                     help='Show the current snapshot in the prod account'
+                    )
+    arg.add_argument('--show-last-snapshot',
+                     metavar='N',
+                     type=int,
+                     default=0,
+                     const=1,
+                     nargs='?',
+                     help="""
+                     Show the last snapshot in the prod account
+                     (or Nth from last if N is specified)
+                     """
+                    )
+
+    arg.add_argument('--verbose',
+                     action='store_true',
+                     help='Verbose output.'
+                    )
+    arg.add_argument('--debug',
+                     action='store_true',
+                     help='Debug output.'
+                    )
+
+    return arg
+
+def set_argument_defaults(args):
+    logging.info('Found --profile: %s', args.profile)
+    logging.info('Found --build-profile: %s', args.build_profile)
+    logging.info('Found --beta-profile: %s', args.beta_profile)
+    logging.info('Found --prod-profile: %s', args.prod_profile)
+
+    if args.profile:
+        if args.beta_profile or args.prod_profile:
+            raise UserWarning("Use --profile or "
+                              "use --beta-profile and --prod-profile.")
+        args.beta_profile = args.profile
+        args.prod_profile = args.profile
+    else:
+        if not (args.beta_profile and args.prod_profile):
+            raise UserWarning("Use --profile or "
+                              "use --beta-profile and --prod-profile.")
+    if not args.build_profile:
+        args.build_profile = args.prod_profile
+
+    logging.info('Using --build-profile: %s', args.build_profile)
+    logging.info('Using --beta-profile: %s', args.beta_profile)
+    logging.info('Using --prod-profile: %s', args.prod_profile)
+    return args
+
+def parse_args():
+    args = create_parser().parse_args()
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO)
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+    logging.debug('Original arguments: %s', args)
+
+    args = set_argument_defaults(args)
+    logging.debug('Final arguments: %s', args)
+
+    return args
+
+################################################################
+# AWS boto3 clients for the build, beta, and prod accounts
+
+def aws_resources(args):
+    profiles = {}
+    accounts = {}
+    def declare_profile_resources(profile):
+        # Declare AWS clients for a profile
+        session = boto3.session.Session(profile_name=profile)
+        accountid = session.client('sts').get_caller_identity()['Account']
+        return {
+            's3': session.client('s3'),
+            'cf': session.client('cloudformation'),
+            'ecr': session.client('ecr'),
+            'bkt': '{}-us-west-2-cbmc'.format(accountid)
+        }
+    def make_profile_resources(profile):
+        # Declare AWS clients at most once for a profile
+        if not profiles.get(profile):
+            profiles[profile] = declare_profile_resources(profile)
+    def make_account_resources(account, profile):
+        # Set shared AWS clients for build, beta, prod accounts
+        accounts[account] = profiles[profile]
+
+    make_profile_resources(args.build_profile)
+    make_profile_resources(args.beta_profile)
+    make_profile_resources(args.prod_profile)
+    logging.debug('Profile resources: %s', profiles)
+
+    make_account_resources(Act.build, args.build_profile)
+    make_account_resources(Act.beta, args.beta_profile)
+    make_account_resources(Act.prod, args.prod_profile)
+    logging.info('Account resources: %s', accounts)
+
+    return accounts
+
+################################################################
+# SHA manipulation
+#
+# Tool versions are identified by the first eight characters
+# of the SHA for the commit.  Packages built from tools include
+# the SHA in their filenames as in string-date-time-sha.tar.gz.
+
+def get_sha(name):
+    try:
+        return name.split('.')[0].split('-')[-1]
+    except IndexError:
+        return None
+
+def filter_sha(names, sha=None):
+    if sha:
+        return [name for name in names if get_sha(name) == sha]
+    return names
+
+################################################################
+# Packages are stored in the s3 package folder
+
+def get_package_paths(s3, bkt, pkg):
+    response = s3.list_objects(Bucket=bkt, Prefix='package/{}'.format(pkg))
+    try:
+        return [object['Key'] for object in response['Contents']
+                if object.get('Key')]
+    except KeyError:
+        logging.info('get_package_paths: s3, bkt, pkg: %s, %s, %s',
+                     s3, bkt, pkg)
+        return None
+
+def get_package_names(s3, bkt, pkg):
+    try:
+        return [path.split('/')[-1]
+                for path in get_package_paths(s3, bkt, pkg)]
+    except IndexError:
+        return None
+
+def get_package_name(s3, bkt, pkg, sha=None):
+    names = filter_sha(get_package_names(s3, bkt, pkg), sha)
+    try:
+        return sorted(names)[-1]
+    except IndexError:
+        return None
+
+################################################################
+# Docker images are stored in the ecr repository
+
+def get_repository_image_names(ecr, repo='cbmc'):
+    response = ecr.list_images(repositoryName=repo)
+    try:
+        return [object['imageTag'] for object in response['imageIds']
+                if object.get('imageTag')]
+    except KeyError:
+        return None
+
+def get_repository_image_tags(ecr, repo='cbmc'):
+    names = get_repository_image_names(ecr, repo)
+    try:
+        return ['-'.join(name.split('-')[-3:]) for name in names]
+    except IndexError:
+        return None
+
+def get_repository_image_tag(ecr, sha=None, repo='cbmc'):
+    tags = filter_sha(get_repository_image_tags(ecr, repo), sha)
+    try:
+        return sorted(tags)[-1]
+    except IndexError:
+        return None
+
+################################################################
+# Snapshots are stored under the s3 folder named snapshot in
+# subfolders named snapshot-date-time.  A snapshot itself is defined
+# by a json file with the name snapshot-date-time.json stored in the
+# folder snapshot-date-time. The current snapshot is the one currently
+# used in the account, the last snapshot is the last one defined in s3
+# folder snapshot.
+
+def get_snapshot(s3, bkt, count=1):
+    response = s3.list_objects(Bucket=bkt, Prefix='snapshot')
+    paths = [object['Key'] for object in response['Contents']]
+    folders = [path.split('/')[1] for path in paths]
+    snapshots = sorted(list(set(folders)))
+    try:
+        return snapshots[-count]
+    except IndexError:
+        return None
+
+def get_last_snapshot_id(s3, bkt, count=1):
+    try:
+        snapshot_folder = get_snapshot(s3, bkt, count)
+        snapshot_id = snapshot_folder[snapshot_folder.find('-')+1:]
+        return snapshot_id
+    except IndexError:
+        return None
+
+def get_current_snapshot_id(cf):
+    params = cf.describe_stacks(StackName='github')['Stacks'][0]['Parameters']
+    for param in params:
+        if param['ParameterKey'] == 'SnapshotID':
+            return param['ParameterValue']
+    return None
+
+def get_snapshot_json(s3, bkt, snapshotid):
+    response = s3.get_object(Bucket=bkt,
+                             Key='snapshot/snapshot-{sid}/snapshot-{sid}.json'.
+                             format(sid=snapshotid))
+    return response['Body'].read().decode('ascii')
+
+def get_current_snapshot_json(s3, cf, bkt, ecr=None):
+    logging.info('get_current_snapshot s3: %s', s3)
+    logging.info('get_current_snapshot cf: %s', cf)
+    logging.info('get_current_snapshot bkt: %s', bkt)
+    return get_snapshot_json(s3, bkt, get_current_snapshot_id(cf))
+
+def get_last_snapshot_json(s3, bkt, count=1, cf=None, ecr=None):
+    return get_snapshot_json(s3, bkt, get_last_snapshot_id(s3, bkt, count))
+
+################################################################
+# Choose the SHAs in the build account to update the snapshot
+
+def tool_shas_build_last(s3, bkt, cf=None, ecr=None):
+    return {
+        Tool.cbmc: get_sha(get_package_name(s3, bkt, 'cbmc')),
+        Tool.batch: get_sha(get_package_name(s3, bkt, 'batch')),
+        Tool.viewer: get_sha(get_package_name(s3, bkt, 'viewer'))
+    }
+
+def tool_shas_beta_current(s3, cf, bkt, ecr=None):
+    snapshot = json.loads(get_current_snapshot_json(s3, cf, bkt))
+    return {
+        Tool.cbmc: get_sha(snapshot['cbmc']),
+        Tool.batch: get_sha(snapshot['batch']),
+        Tool.viewer: get_sha(snapshot['viewer'])
+    }
+
+def tool_shas(args, build, beta):
+    if args.profile:
+        logging.info('Using build last tools')
+        shas = tool_shas_build_last(**build)
+    else:
+        logging.info('Using beta current tools')
+        shas = tool_shas_beta_current(**beta)
+
+    if args.cbmc_sha:
+        logging.info('Overriding cbmc tool')
+        shas[Tool.cbmc] = args.cbmc_sha
+    if args.batch_sha:
+        logging.info('Overriding batch tool')
+        shas[Tool.batch] = args.batch_sha
+    if args.viewer_sha:
+        logging.info('Overriding viewer tool')
+        shas[Tool.viewer] = args.viewer_sha
+
+    logging.info('Tool SHAs: %s', shas)
+    return shas
+
+def update_shas(args, build, beta):
+    tools = tool_shas(args, build, beta)
+
+    shas = {
+        Pkg.cbmc: args.cbmc_sha or tools[Tool.cbmc],
+        Pkg.batch: args.batch_sha or tools[Tool.batch],
+        Pkg.template: args.batch_sha or tools[Tool.batch],
+        Pkg.lambd: args.batch_sha or tools[Tool.batch],
+        Pkg.docker: args.batch_sha or tools[Tool.batch],
+        Pkg.viewer: args.viewer_sha or tools[Tool.viewer],
+    }
+
+    logging.info('Update SHAs: %s', shas)
+    return shas
+
+def update_pkgs(args, sha, s3, ecr, bkt, cf=None):
+    pkg = {
+        Pkg.cbmc: get_package_name(s3, bkt, 'cbmc', sha[Pkg.cbmc]),
+        Pkg.batch: get_package_name(s3, bkt, 'batch', sha[Pkg.batch]),
+        Pkg.template: get_package_name(s3, bkt, 'template', sha[Pkg.template]),
+        Pkg.lambd: get_package_name(s3, bkt, 'lambda', sha[Pkg.lambd]),
+        Pkg.docker: get_repository_image_tag(ecr, sha[Pkg.docker]),
+        Pkg.viewer: get_package_name(s3, bkt, 'viewer', sha[Pkg.viewer])
+    }
+
+    if args.no_cbmc_update:
+        pkg[Pkg.cbmc] = None
+    if args.no_batch_update:
+        pkg[Pkg.batch] = None
+        pkg[Pkg.template] = None
+        pkg[Pkg.lambd] = None
+        pkg[Pkg.docker] = None
+    if args.no_viewer_update:
+        pkg[Pkg.viewer] = None
+    if args.no_docker_update:
+        pkg[Pkg.docker] = None
+    if args.only_batch_update:
+        pkg[Pkg.cbmc] = None
+        pkg[Pkg.viewer] = None
+        pkg[Pkg.docker] = None
+
+    logging.info('Update packages: %s', pkg)
+    return pkg
+
+################################################################
+# Propose the new snapshot
+
+def propose(args, resources):
+    shas = update_shas(args, resources[Act.build], resources[Act.beta])
+    pkgs = update_pkgs(args, shas, **resources[Act.build])
+    prod = json.loads(get_current_snapshot_json(**resources[Act.prod]))
+    prod['cbmc'] = pkgs[Pkg.cbmc] or prod['cbmc']
+    prod['batch'] = pkgs[Pkg.batch] or prod['batch']
+    prod['templates'] = pkgs[Pkg.template] or prod['templates']
+    prod['lambda'] = pkgs[Pkg.lambd] or prod['lambda']
+    prod['docker'] = pkgs[Pkg.docker] or prod['docker']
+    prod['viewer'] = pkgs[Pkg.viewer] or prod['viewer']
+    del prod['parameters']['ImageTagSuffix']
+    del prod['parameters']['SnapshotID']
+
+    logging.info('Proposing snapshot: %s', prod)
+    return prod
+
+def initial(args, resources):
+    shas = update_shas(args, resources[Act.build], resources[Act.beta])
+    pkgs = update_pkgs(args, shas, **resources[Act.build])
+    prod = {'parameters': {}}
+    prod['cbmc'] = pkgs[Pkg.cbmc] or prod.get('cbmc')
+    prod['batch'] = pkgs[Pkg.batch] or prod.get('batch')
+    prod['templates'] = pkgs[Pkg.template] or prod.get('templates')
+    prod['lambda'] = pkgs[Pkg.lambd] or prod.get('lambda')
+    prod['docker'] = pkgs[Pkg.docker] or prod.get('docker')
+    prod['viewer'] = pkgs[Pkg.viewer] or prod.get('viewer')
+
+    logging.info('Proposing snapshot: %s', prod)
+    return prod
+
+
+################################################################
+
+def main():
+    args = parse_args()
+    resources = aws_resources(args)
+
+    if args.show_current_snapshot:
+        print(get_current_snapshot_json(**resources[Act.prod]))
+        sys.exit()
+
+    if args.show_last_snapshot:
+        print(get_last_snapshot_json(**resources[Act.prod], count=args.show_last_snapshot))
+        sys.exit()
+
+    if args.initial:
+        print(json.dumps(initial(args, resources), indent=2))
+        sys.exit()
+
+    print(json.dumps(propose(args, resources), indent=2))
+
+if __name__ == '__main__':
+    main()

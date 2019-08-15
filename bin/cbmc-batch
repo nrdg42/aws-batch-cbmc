@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Driver for the CBMC AWS tool running CBMC on AWS."""
+
+import sys
+import json
+
+import yaml
+
+import s3
+from cbmc import CBMC
+import options
+
+################################################################
+
+def abort(msg):
+    """Abort a CBMC job"""
+
+    print("CBMC failed: {}".format(msg))
+    sys.exit(1)
+
+################################################################
+
+def prepare_paths(opts, quiet=True):
+    """Check that the needed S3 paths exist and fill the input paths."""
+
+    for path in [opts['srcbucket'], opts['wsbucket']]:
+        bkt = s3.bucket_name(path)
+        if not s3.bucket_exists(bkt, region=opts['region']):
+            abort("Bucket does not exist: {}".format(bkt))
+
+    if opts['copysrc']:
+        s3.sync_directory_to_bucket(opts['srcdir'], opts['srcbucket'], quiet)
+    if opts['copyws']:
+        s3.sync_directory_to_bucket(opts['wsdir'], opts['wsbucket'], quiet)
+    if opts['copyout']:
+        s3.sync_directory_to_bucket(opts['outdir'], opts['outbucket'], quiet)
+
+def consume_paths(opts, quiet=True):
+    """Copy the output path"""
+
+    s3.sync_bucket_to_directory(opts['outbucket'], opts['outdir'], quiet)
+
+################################################################
+
+def dump_options(opts):
+    """Write jobs options to YAML and JSON files"""
+
+    opts_yaml = yaml.dump(opts, default_flow_style=False)
+    opts_json = json.dumps(opts, indent=4, sort_keys=True)
+
+    yaml_file = "{}.yaml".format(opts['jobname'])
+    json_file = "{}.json".format(opts['jobname'])
+
+    with open(yaml_file, "w") as yfile:
+        yfile.write(opts_yaml)
+    with open(json_file, "w") as jfile:
+        jfile.write(opts_json)
+
+    return (yaml_file, json_file)
+
+def dump_makefile(opts, results, yaml_file, json_file):
+    """Write helpful job-monitoring and maintenance commands to a makefile"""
+
+    job_name = results['jobname']
+    makefile_name = "Makefile-{}".format(job_name)
+    dir_name = job_name
+
+    job_queue = opts['jobqueue']
+    monitor_cmd = ("cbmc-status --jobqueue {} --jobname {} --monitor"
+                   .format(job_queue, job_name))
+    copy_cmd = ("mkdir -p {job}; aws s3 sync {out} {job} --quiet"
+                .format(job=job_name, out=opts['outbucket']))
+    cleanup_cmd = ("$(RM) -r {} {} {} {}"
+                   .format(makefile_name, yaml_file, json_file, dir_name))
+    kill_cmd = ("cbmc-kill --jobqueue {} --jobname {}"
+                .format(job_queue, job_name))
+    replay_cmd = ("cbmc --json {}".format(json_file))
+
+    with open(makefile_name, "w") as mkf:
+        mkf.write("default: monitor\n\n")
+        mkf.write("monitor:\n")
+        mkf.write("\t{}\n\n".format(monitor_cmd))
+        mkf.write("copy:\n")
+        mkf.write("\t{}\n\n".format(copy_cmd))
+        mkf.write("cleanup:\n")
+        mkf.write("\t{}\n\n".format(cleanup_cmd))
+        mkf.write("kill:\n")
+        mkf.write("\t{}\n\n".format(kill_cmd))
+        mkf.write("replay:\n")
+        mkf.write("\t{}\n\n".format(replay_cmd))
+        mkf.write("\n# Job options written to {} and {}\n"
+                  .format(yaml_file, json_file))
+
+    return makefile_name
+
+def main():
+    """Run a CBMC job in AWS Batch."""
+
+    opts = options.batch_options()
+
+    prepare_paths(opts)
+
+    cbmc = CBMC(opts)
+    results = cbmc.submit_jobs()
+    opts['tasks'] = results
+
+    print()
+    print("Launching job {}:".format(results['jobname']))
+    print("  Build task:    {}".format(results['build']['jobname']))
+    print("  Property task: {}".format(results['property']['jobname']))
+    print("  Coverage task: {}".format(results['coverage']['jobname']))
+    print("  Report task:   {}".format(results['report']['jobname']))
+    print()
+
+    if opts['no-file-output']:
+        return
+
+    (yaml_file, json_file) = dump_options(opts)
+    makefile = dump_makefile(opts, results, yaml_file, json_file)
+
+    print("Job options written to\n  {}\n  {}".format(yaml_file, json_file))
+    print()
+    print("See {}:".format(makefile))
+    print('  Monitor tasks with\n    make -f {} monitor'.format(makefile))
+    print('  Copy results when done with\n    make -f {} copy'.format(makefile))
+    print('  Cleanup results when done with\n    make -f {} cleanup'
+          .format(makefile))
+    print('  Kill running tasks with\n    make -f {} kill'.format(makefile))
+    print('  Rerun this job with\n    make -f {} replay'.format(makefile))
+    print()
+
+if __name__ == "__main__":
+    main()

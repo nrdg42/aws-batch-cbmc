@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+#pylint: disable=missing-docstring
+
+import logging
+import argparse
+import subprocess
+
+################################################################
+# Argument parsing
+
+def create_parser():
+    arg = argparse.ArgumentParser(description="""
+    Update an account: either update beta or promote beta to prod.
+    """)
+
+    arg.add_argument('--profile',
+                     metavar='PROFILE',
+                     help='The AWS account profile (the default for beta, prod, build).'
+                    )
+    arg.add_argument('--beta-profile',
+                     metavar='PROFILE',
+                     help='The AWS account profile for the beta account.'
+                    )
+    arg.add_argument('--prod-profile',
+                     metavar='PROFILE',
+                     help='The AWS account profile for the prod account.'
+                    )
+    arg.add_argument('--build-profile',
+                     metavar='PROFILE',
+                     help="""
+                     The AWS account profile for the build account
+                     (defaults to prod account)."""
+                    )
+    arg.add_argument('--is-prod',
+                     action='store_true',
+                     help='Updating a production account.'
+                    )
+
+
+    arg.add_argument('--cbmc-sha',
+                     metavar='SHA',
+                     help='SHA of the CBMC commit to use.'
+                    )
+    arg.add_argument('--batch-sha',
+                     metavar='SHA',
+                     help='SHA of the CBMC Batch commit to use.'
+                    )
+    arg.add_argument('--viewer-sha',
+                     metavar='SHA',
+                     help='SHA of the CBMC Viewer commit to use.'
+                    )
+
+    arg.add_argument('--no-cbmc-update',
+                     action='store_true',
+                     help='Do not update the cbmc package.'
+                    )
+    arg.add_argument('--no-batch-update',
+                     action='store_true',
+                     help='Do not update the batch packages (including docker).'
+                    )
+    arg.add_argument('--no-viewer-update',
+                     action='store_true',
+                     help='Do not update the viewer package.'
+                    )
+    arg.add_argument('--no-docker-update',
+                     action='store_true',
+                     help='Do not update the docker image.'
+                    )
+    arg.add_argument('--only-batch-update',
+                     action='store_true',
+                     help='Update only the batch packages (but not docker).'
+                    )
+
+
+    arg.add_argument('--canary',
+                     action='store_true',
+                     help='Run canary to test update.'
+                    )
+
+    arg.add_argument('--verbose',
+                     action='store_true',
+                     help='Verbose output.'
+                    )
+    arg.add_argument('--debug',
+                     action='store_true',
+                     help='Debug output.'
+                    )
+
+    return arg
+
+def parse_args():
+    args = create_parser().parse_args()
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO)
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+    logging.info('Arguments: %s', args)
+
+    return args
+
+################################################################
+#
+
+def run(string):
+    print('Running: {}'.format(string))
+    result = subprocess.run(string.split(),
+                            check=True, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr)
+    return result.stdout
+
+def snapshot_propose_args(args):
+    """Pass relevant arguments to snapshot-propose."""
+    options = {
+        '--profile': args.profile,
+        '--beta-profile': args.beta_profile,
+        '--prod-profile': args.prod_profile,
+        '--build-profile': args.build_profile,
+        '--cbmc-sha': args.cbmc_sha,
+        '--batch-sha': args.batch_sha,
+        '--viewer-sha': args.viewer_sha
+    }
+    booleans = {
+        '--no-cbmc-update': args.no_cbmc_update,
+        '--no-batch-update': args.no_batch_update,
+        '--no-viewer-update': args.no_viewer_update,
+        '--no-docker-update': args.no_docker_update,
+        '--only-batch-update': args.only_batch_update,
+        '--verbose': args.verbose,
+        '--debug': args.debug
+    }
+    opts = []
+    for opt, val in options.items():
+        if val is not None:
+            opts.extend([opt, val])
+    for opt, val in booleans.items():
+        if val:
+            opts.append(opt)
+    return opts
+
+def write_snapshot_json(output):
+    with open('snapshot.json', 'w') as jsn:
+        jsn.write(output)
+
+def parse_snapshot_id(output):
+    sid = None
+    for line in output.split('\n'):
+        if line.startswith('Updating SnapshotID to '):
+            sid = line[len('Updating SnapshotID to '):]
+            break
+    if sid is None:
+        raise UserWarning("snapshot id is none")
+    return sid
+
+################################################################
+#
+
+def main():
+    args = parse_args()
+
+    cmd = 'snapshot-propose ' + " ".join(snapshot_propose_args(args))
+    output = run(cmd)
+    write_snapshot_json(output)
+
+    profile = args.profile or args.prod_profile
+
+    cmd = 'snapshot-create --profile {} --snapshot snapshot.json'
+    output = run(cmd.format(profile))
+    sid = parse_snapshot_id(output)
+
+    cmd = 'snapshot-deploy --profile {} --snapshotid {} --build'
+    run(cmd.format(profile, sid))
+    cmd = 'snapshot-deploy --profile {} --snapshotid {} --prod'
+    run(cmd.format(profile, sid))
+    cmd = 'snapshot-variable --profile {} --operational'
+    run(cmd.format(profile))
+    if args.is_prod:
+        cmd = 'snapshot-variable --profile {} --updating'
+    else:
+        cmd = 'snapshot-variable --profile {} --not-updating'
+    run(cmd.format(profile))
+    cmd = 'snapshot-variable --profile {} --show-status'
+    run(cmd.format(profile))
+
+    if args.canary:
+        cmd = 'snapshot-canary --profile {}'
+        run(cmd.format(profile))
+
+if __name__ == '__main__':
+    main()

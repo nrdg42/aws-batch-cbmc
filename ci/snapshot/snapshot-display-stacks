@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import argparse
+import botocore_amazon.monkeypatch
+import boto3
+
+import stackst
+
+################################################################
+
+def create_parser():
+    arg = argparse.ArgumentParser(description='Display stacks.')
+
+    arg.add_argument('--profile',
+                     metavar='NAME',
+                     help='AWS account profile name'
+                    )
+    arg.add_argument('--stack',
+                     nargs='+',
+                     help='Stacks to display'
+                    )
+    arg.add_argument('--build',
+                     action="store_true",
+                     help='Display build stacks'
+                    )
+    arg.add_argument('--prod',
+                     action="store_true",
+                     help='Display production stacks'
+                    )
+    return arg
+
+################################################################
+
+BUILD_STACKS = ['globals',
+                'build-batch', 'build-cbmc-linux',
+                'build-viewer', 'build-docker',
+                'alarms-build']
+PROD_STACKS = ['cbmc-batch', 'github', 'canary', 'alarms-prod']
+
+
+def main():
+    args = create_parser().parse_args()
+    session = boto3.session.Session(profile_name=args.profile)
+    stacks = stackst.Stacks(session)
+
+    if args.build:
+        stacks.display(BUILD_STACKS)
+    if args.prod:
+        stacks.display(PROD_STACKS)
+
+    if not any([args.build, args.prod]):
+        stacks.display(args.stack)
+
+if __name__ == "__main__":
+    main()

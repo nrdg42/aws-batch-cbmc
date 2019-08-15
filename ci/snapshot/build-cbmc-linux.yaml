@@ -1,0 +1,167 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  S3BucketName:
+    Type: String
+
+  GitHubToken:
+    Type: String
+
+  CBMCBranchName:
+    Type: String
+    Default: develop
+
+Resources:
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "codebuild-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+              - Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource: !Sub "arn:aws:s3:::${S3BucketName}"
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+
+  BuildCBMCLinux:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:1.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref S3BucketName
+      Name: "Build-CBMC-Linux-Project"
+      ServiceRole: !Ref CodeBuildRole
+      Cache:
+        Type: S3
+        Location: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "cbmc-linux-build-cache"]]
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - apt-get update -y
+                - apt-get install -y g++ flex bison make libwww-perl patch ccache
+            build:
+              commands:
+                - make -C src minisat2-download
+                - make -C src -j8 CXX="ccache g++" LINKFLAGS="-static-libstdc++" GIT_INFO=${CODEBUILD_RESOLVED_SOURCE_VERSION}
+                - ccache -s
+            post_build:
+              commands:
+                - cd src
+                - cp goto-analyzer/goto-analyzer cbmc/
+                - cp goto-cc/goto-cc cbmc/
+                - cp goto-instrument/goto-instrument cbmc/
+                - tar czf cbmc.tar.gz cbmc/cbmc cbmc/goto-cc cbmc/goto-analyzer cbmc/goto-instrument
+                - export DATE=`date -u +%Y%m%d-%H%M%S`
+                - export COMMIT=`expr substr ${CODEBUILD_RESOLVED_SOURCE_VERSION} 1 8`
+                - aws s3 cp cbmc.tar.gz "s3://$S3_BUCKET/package/cbmc/cbmc-$DATE-$COMMIT.tar.gz"
+          cache:
+            paths:
+            - '/var/cache/apt/**/*'
+            - '/var/lib/apt/lists/**/*'
+            - '/root/.ccache/**/*'
+
+  BuildCBMCLinuxPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "infrastructurepipeline-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Effect: Allow
+                Resource:
+                  - !GetAtt BuildCBMCLinux.Arn
+              - Action:
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketName}", "*"]]
+
+  BuildCBMCLinuxPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: "Build-CBMC-Linux-Pipeline"
+      RoleArn: !GetAtt BuildCBMCLinuxPipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3BucketName
+      Stages:
+        - Name: "Build-CBMC-Linux-Source"
+          Actions:
+            - Name: "Build-CBMC-Linux-Source-Action"
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Owner: diffblue
+                Repo: cbmc
+                Branch: !Ref CBMCBranchName
+                OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: True
+              OutputArtifacts:
+                - Name: "cbmc-src"
+        - Name: "Build-CBMC-Linux-Build"
+          Actions:
+            - Name: "Build-CBMC-Linux-Build-Action"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref BuildCBMCLinux
+              InputArtifacts:
+                - Name: "cbmc-src"
+              RunOrder: 2
+
+Outputs:
+  BuildCBMCLinuxPipeline:
+    Value: !Ref BuildCBMCLinuxPipeline
+    Export:
+      Name: BuildCBMCLinuxPipeline

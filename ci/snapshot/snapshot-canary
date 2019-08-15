@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+#pylint: disable=missing-docstring
+
+import logging
+import argparse
+
+import botocore_amazon.monkeypatch
+import boto3
+
+################################################################
+# Argument parsing
+
+def create_parser():
+    arg = argparse.ArgumentParser(description="""
+    Run the canary in a continuous integration account.
+    """)
+    arg.add_argument('--profile',
+                     metavar='PROFILE',
+                     help='AWS account profile name.')
+    return arg
+
+def lambda_name(client, name):
+    """Return lambda function name."""
+    functions = [fnc['FunctionName']
+                 for fnc in client.list_functions()['Functions']]
+    candidates = [fnc for fnc in functions if name in fnc]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise UserWarning("No single function with name {} in {}".
+                      format(name, functions))
+
+def run_lambda(client, name):
+    """Run lambda function name."""
+    name = lambda_name(client, name)
+    logging.info('Running lambda function %s', name)
+    response = client.invoke(FunctionName=name)
+    logging.info('Lambda function returned %s', response)
+    if response['StatusCode'] == 200:
+        return
+    raise UserWarning('Invocation of {} returned {}'.format(name, response))
+
+def main():
+    args = create_parser().parse_args()
+    session = boto3.session.Session(profile_name=args.profile)
+    run_lambda(session.client('lambda'), 'CanaryLambda')
+
+if __name__ == '__main__':
+    main()

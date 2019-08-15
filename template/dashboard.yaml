@@ -1,0 +1,49 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create a dashboard monitoring CBMC Batch executions
+
+Parameters:
+  ProjectName:
+    Type: String
+
+Resources:
+  DashboardSideBySide:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Ref ProjectName
+      DashboardBody: !Sub '
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "${ProjectName}", "Attempts" ],
+                  [ ".", "Errors" ],
+                  [ ".", "Successes" ],
+                  [ ".", "Failures" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 3600,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                },
+                "title": "${ProjectName} verification: Success and error counts"
+              }
+            }
+          ],
+          "start": "-P7D",
+          "periodOverride": "auto"
+        }
+        '

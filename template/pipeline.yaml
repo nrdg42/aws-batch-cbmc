@@ -1,0 +1,494 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  GitHubToken:
+    Type: String
+
+  NotificationAddress:
+    Type: String
+
+Resources:
+  BatchCodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: "CBMC-batch"
+      RepositoryDescription: "PicaPica-synchronized copy of gitfarm CBMC-batch"
+
+  CoverageCodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: "CBMC-coverage"
+      RepositoryDescription: "PicaPica-synchronized copy of gitfarm CBMC-coverage"
+
+  PicaPicaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: prod.picapica.aws.internal
+          Action: sts:AssumeRole
+      RoleName: "picapica-role"
+      Policies:
+        - PolicyName: !Sub "picapica-policy"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - codecommit:GetRepository
+                  - codecommit:GitPush
+                  - codecommit:UpdateDefaultBranch
+                  - picapica:GetDestination
+                  - picapica:PutDestination
+                  - picapica:ListDestinations
+                  - picapica:DeleteDestination
+                Effect: Allow
+                Resource:
+                  - !GetAtt BatchCodeCommitRepository.Arn
+                  - !Sub "arn:aws:picapica:${AWS::Region}:${AWS::AccountId}:/destinations/CBMC-batch"
+                  - !GetAtt CoverageCodeCommitRepository.Arn
+                  - !Sub "arn:aws:picapica:${AWS::Region}:${AWS::AccountId}:/destinations/CBMC-coverage"
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-cbmc-batch"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  DockerBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      RoleName: !Sub "dockerbuild-role-${AWS::Region}"
+      Policies:
+        - PolicyName: !Sub "dockerbuild-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - ecr:GetAuthorizationToken
+                Effect: Allow
+                Resource: "*"
+              - Action:
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchCheckLayerAvailability
+                Effect: Allow
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/cbmc"
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+              - Action:
+                  - s3:GetObject
+                Effect: Allow
+                Resource: !Join ["/", [!GetAtt S3Bucket.Arn, "*"]]
+
+  DockerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: cbmc
+      LifecyclePolicy:
+        LifecyclePolicyText: '
+          {
+            "rules": [ {
+              "rulePriority": 10,
+              "description": "remove untagged images except the latest one",
+              "selection": {
+                "tagStatus": "untagged",
+                "countType": "imageCountMoreThan",
+                "countNumber": 1
+              },
+              "action": {
+                "type": "expire"
+              }
+            } ]
+          }'
+
+  DockerBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/docker:17.09.0
+        Type: LINUX_CONTAINER
+      Name: docker-build
+      ServiceRole: !Ref DockerBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - $(aws ecr get-login --region ${AWS::Region} --no-include-email)
+                - >
+                  make -C docker
+                  REPO=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cbmc
+                  FLAGS="--build-arg UBUNTU_ARCHIVE=${AWS::Region}.ec2.archive.ubuntu.com"
+                - >
+                  make -C docker install
+                  REPO=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cbmc
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      RoleName: !Sub "codebuild-role-${AWS::Region}"
+      Policies:
+        - PolicyName: !Sub "codebuild-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!GetAtt S3Bucket.Arn, "*"]]
+              - Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource: !GetAtt S3Bucket.Arn
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+
+  PackageBatch:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref S3Bucket
+      Name: package-batch
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - make -C pkg-batch BATCHDIR=..
+                - >
+                  aws s3 cp pkg-batch/cbmc-batch.tar.gz
+                  "s3://$S3_BUCKET/package/cbmc-batch.tar.gz"
+                - |
+                  set -e
+                  cd pkg-cbmc
+                  tar czf patches.tar.gz patches
+                  aws s3 cp patches.tar.gz \
+                    "s3://$S3_BUCKET/package/cbmc-patches.tar.gz"
+
+  PackageViewer:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref S3Bucket
+      Name: package-viewer
+      ServiceRole: !Ref CodeBuildRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - mkdir /tmp/cbmc-viewer
+                - mv * /tmp/cbmc-viewer/
+                - mv /tmp/cbmc-viewer .
+                - tar czf cbmc-viewer.tar.gz cbmc-viewer
+                - >
+                  aws s3 cp cbmc-viewer.tar.gz
+                  "s3://$S3_BUCKET/package/cbmc-viewer.tar.gz"
+
+  CBMCLinuxBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/ubuntu-base:14.04
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref S3Bucket
+      Name: goto-cc-build
+      ServiceRole: !Ref CodeBuildRole
+      Cache:
+        Type: S3
+        Location: !Join ["/", [!GetAtt S3Bucket.Arn, "cbmc-linux-build-cache"]]
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - add-apt-repository ppa:ubuntu-toolchain-r/test -y
+                - >
+                  apt-key adv --keyserver hkp://keys.gnupg.net --recv-keys BA9EF27F ||
+                  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys BA9EF27F
+                - apt-get update -y
+                - apt-get install -y g++-5 flex bison make git libwww-perl patch ccache
+                - update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-5 1
+                - update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-5 1
+            build:
+              commands:
+                - |
+                  set -e
+                  aws s3 cp "s3://$S3_BUCKET/package/cbmc-patches.tar.gz" patches.tar.gz
+                  tar xzf patches.tar.gz
+                  for p in patches/*
+                  do
+                    patch -p1 < $p
+                  done
+                - make -C src minisat2-download
+                - make -C src CXX="ccache g++" -j8
+                - ccache -s
+            post_build:
+              commands:
+                - |
+                  set -e
+                  cd src
+                  cp goto-analyzer/goto-analyzer cbmc/
+                  cp goto-cc/goto-cc cbmc/
+                  cp goto-instrument/goto-instrument cbmc/
+                  tar czf cbmc.tar.gz \
+                    cbmc/cbmc cbmc/goto-cc cbmc/goto-analyzer cbmc/goto-instrument
+                  aws s3 cp cbmc.tar.gz "s3://$S3_BUCKET/package/cbmc.tar.gz"
+          cache:
+            paths:
+            - '/var/cache/apt/**/*'
+            - '/var/lib/apt/lists/**/*'
+            - '/root/.ccache/**/*'
+
+  InfrastructurePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      RoleName: !Sub "infrastructurepipeline-role-${AWS::Region}"
+      Policies:
+        - PolicyName: !Sub "infrastructurepipeline-policy-${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                Effect: Allow
+                Resource:
+                  - !GetAtt BatchCodeCommitRepository.Arn
+                  - !GetAtt CoverageCodeCommitRepository.Arn
+              - Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Effect: Allow
+                Resource:
+                  - !GetAtt CBMCLinuxBuild.Arn
+                  - !GetAtt DockerBuild.Arn
+                  - !GetAtt PackageBatch.Arn
+                  - !GetAtt PackageViewer.Arn
+              - Action:
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!GetAtt S3Bucket.Arn, "*"]]
+
+  InfrastructurePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: "batch-pipeline"
+      RoleArn: !GetAtt InfrastructurePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3Bucket
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "CBMC"
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Owner: diffblue
+                Repo: cbmc
+                Branch: develop
+                OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: True
+              OutputArtifacts:
+                - Name: "cbmc-src"
+            - Name: "Batch-CodeCommit"
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: !GetAtt BatchCodeCommitRepository.Name
+                BranchName: master
+              OutputArtifacts:
+                - Name: "batch-src"
+            - Name: "Viewer-CodeCommit"
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: !GetAtt CoverageCodeCommitRepository.Name
+                BranchName: master
+              OutputArtifacts:
+                - Name: "view-src"
+        - Name: "Build"
+          Actions:
+            - Name: "Docker-Build"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref DockerBuild
+              InputArtifacts:
+                - Name: "batch-src"
+              RunOrder: 1
+            - Name: "Package-Batch"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref PackageBatch
+              InputArtifacts:
+                - Name: "batch-src"
+              RunOrder: 1
+            - Name: "Package-Viewer"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref PackageViewer
+              InputArtifacts:
+                - Name: "view-src"
+              RunOrder: 1
+            - Name: "CBMC-Linux"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CBMCLinuxBuild
+              InputArtifacts:
+                - Name: "cbmc-src"
+              RunOrder: 2
+
+  SnsInfrastructureTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "CBMC Batch Verification Infrastructure"
+      TopicName: "cbmc-batch-verification-infrastructure"
+
+  SnsInfrastructureSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref NotificationAddress
+      Protocol: email
+      TopicArn: !Ref SnsInfrastructureTopic
+
+  InfrastructureEventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SnsInfrastructureTopic
+      Topics:
+        - !Ref SnsInfrastructureTopic
+
+  InfrastructureEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "CodePipeline failure rule"
+      EventPattern:
+        source:
+          - aws.codepipeline
+        detail-type:
+          - "CodePipeline Action Execution State Change"
+        detail:
+          state:
+            - FAILED
+          pipeline:
+            - !Ref InfrastructurePipeline
+      State: ENABLED
+      Targets:
+        - Arn: !Ref SnsInfrastructureTopic
+          Id: "InfrastructurePipelineTopic"
+          InputTransformer:
+            InputTemplate: !Sub '"The pipeline <state> at stage <stage> to perform <action>. Go to https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/"'
+            InputPathsMap:
+              state: "$.detail.state"
+              stage: "$.detail.stage"
+              action: "$.detail.action"

@@ -1,0 +1,4 @@
+*.zip
+snapshot-*-*
+snapshot.json
+__pycache__

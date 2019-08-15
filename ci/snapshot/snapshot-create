@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import argparse
+import time
+import os
+import shutil
+import tarfile
+
+import botocore_amazon.monkeypatch
+import boto3
+
+import stackst
+import snapshott
+
+################################################################
+
+def create_parser():
+    arg = argparse.ArgumentParser(description="""
+    Create a snapshot from a json configuration file.
+    """)
+
+    arg.add_argument('--profile',
+                     metavar='NAME',
+                     help='AWS account profile name'
+                    )
+    arg.add_argument('--snapshot',
+                     metavar='FILE',
+                     default='snapshot.json',
+                     help='JSON file defining snapshot (default: %(default)s)'
+                    )
+    return arg
+
+################################################################
+
+def get_cbmc_tarfile(s3client, bucket, filename):
+    key = "package/cbmc/{}".format(filename)
+    print("Downloading {}/{} to {}".format(bucket, key, filename))
+    s3client.download_file(Bucket=bucket,
+                           Key=key,
+                           Filename=filename)
+    os.rename(filename, 'cbmc.tar.gz')
+
+def get_viewer_tarfile(s3client, bucket, filename):
+    key = "package/viewer/{}".format(filename)
+    print("Downloading {}/{} to {}".format(bucket, key, filename))
+    s3client.download_file(Bucket=bucket,
+                           Key=key,
+                           Filename=filename)
+    os.rename(filename, 'cbmc-viewer.tar.gz')
+
+def get_batch_tarfile(s3client, bucket, filename):
+    key = "package/batch/{}".format(filename)
+    print("Downloading {}/{} to {}".format(bucket, key, filename))
+    s3client.download_file(Bucket=bucket,
+                           Key=key,
+                           Filename=filename)
+    os.rename(filename, 'cbmc-batch.tar.gz')
+
+def get_lambda_tarfile(s3client, bucket, filename):
+    key = "package/lambda/{}".format(filename)
+    print("Downloading {}/{} to {}".format(bucket, key, filename))
+    s3client.download_file(Bucket=bucket,
+                           Key=key,
+                           Filename=filename)
+    os.rename(filename, 'lambda.zip')
+
+def get_templates_tarfile(s3client, bucket, filename):
+    key = "package/template/{}".format(filename)
+    print("Downloading {}/{} to {}".format(bucket, key, filename))
+    s3client.download_file(Bucket=bucket,
+                           Key=key,
+                           Filename=filename)
+    os.rename(filename, 'templates.tar.gz')
+
+def extract_templates():
+    print("Extracting cloudformation templates")
+    tar = tarfile.open('templates.tar.gz')
+    prefix = os.path.commonprefix(tar.getnames())
+    tar.extractall()
+    for yaml in os.listdir(prefix):
+        shutil.copyfile(os.path.join(prefix, yaml), yaml)
+    shutil.rmtree(prefix)
+
+def main():
+    args = create_parser().parse_args()
+
+    session = boto3.session.Session(profile_name=args.profile)
+    stacks = stackst.Stacks(session)
+    s3client = session.client('s3')
+
+    snapshot = snapshott.Snapshot(filename=args.snapshot)
+
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    snapshot_dir = "snapshot-{}".format(timestamp)
+    snapshot_file = "snapshot-{}.json".format(timestamp)
+    print("Creating directory {}".format(snapshot_dir))
+    os.mkdir(snapshot_dir)
+    os.chdir(snapshot_dir)
+
+    bucket = stacks.get_output('S3BucketName')
+    get_cbmc_tarfile(s3client, bucket, snapshot.get_cbmc())
+    get_batch_tarfile(s3client, bucket, snapshot.get_batch())
+    get_viewer_tarfile(s3client, bucket, snapshot.get_viewer())
+    get_lambda_tarfile(s3client, bucket, snapshot.get_lambda())
+    get_templates_tarfile(s3client, bucket, snapshot.get_templates())
+    extract_templates()
+
+    docker = snapshot.get_docker()
+    imagetagsuffix = ('' if docker.startswith('-') else '-') + docker
+    print("Updating ImageTagSuffix to {}".format(imagetagsuffix))
+    snapshot.update_imagetagsuffix(imagetagsuffix)
+    print("Updating SnapshotID to {}".format(timestamp))
+    snapshot.update_snapshotid(timestamp)
+    print("Writing {}".format(snapshot_file))
+    snapshot.write(snapshot_file)
+
+    print("Uploading snapshot to s3://{}/snapshot/{}".
+          format(bucket, snapshot_dir))
+    for filename in os.listdir('.'):
+        s3client.upload_file(Filename=filename, Bucket=bucket,
+                             Key='snapshot/{}/{}'.format(snapshot_dir, filename))
+
+if __name__ == "__main__":
+    main()

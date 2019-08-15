@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+import argparse
+from datetime import datetime, timezone
+
+import botocore_amazon.monkeypatch
+import boto3
+
+################################################################
+
+def create_parser():
+    arg = argparse.ArgumentParser(
+        description='Scan CloudWatch logs for validation errors.')
+
+    arg.add_argument('--profile',
+                     metavar='PROFILE',
+                     default='default',
+                     help="""
+                     The AWS account profile (default: %(default)s).
+                     """
+                    )
+    arg.add_argument('--utc',
+                     metavar='TIME',
+                     required=True,
+                     help="""
+                     The time to begin the log search.  This is a UTC
+                     time given as any valid ISO date string such as
+                     YYYY-MM-DDTHH:MM:SS.
+                     """
+                    )
+    arg.add_argument('--interval',
+                     nargs='+',
+                     metavar='M',
+                     type=int,
+                     default=[10, 60],
+                     help="""
+                     The interval about the start time to search the
+                     logs.  Use --interval A to begin the search A
+                     minutes before the time given by --utc. Use
+                     --interval A B to begin the search A minutes
+                     before --utc and end B minutes after --utc
+                     (default: --interval 10 60).
+                     """
+                    )
+    arg.add_argument('--errors',
+                     action='store_true',
+                     help="""
+                     Display the names of the CBMC jobs generating validation
+                     errors.
+                     """
+                    )
+    arg.add_argument('--webhook',
+                     metavar='JOB',
+                     help="""
+                     Display the logs for the webhook that launched
+                     the CBMC Batch task named TASK
+                     (TASK probably has the form PROOF-YYYYMMDD-HHMMSS).
+                     """
+                    )
+    arg.add_argument('--batch',
+                     metavar='TASK',
+                     help="""
+                     Display the logs for the CBMC Batch job named JOB
+                     (JOB probably has the form PROOF-YYYYMMDD-HHMMSS-build).
+                     """
+                    )
+    arg.add_argument('--dump',
+                     metavar='LOG',
+                     help="""
+                     Display log records from log whose name contains
+                     the string LOG (case insensitive).
+                     """
+                    )
+    arg.add_argument('--brief',
+                     action='store_true',
+                     help="""
+                     Display brief log messages.
+                     """
+                    )
+    arg.add_argument('--batch-job-failures',
+                     action='store_true',
+                     help="""
+                     Display the list of AWS Batch job failures.
+                     """
+                    )
+
+    return arg
+
+################################################################
+
+class LogGroup:
+    """Manage AWS CloudWatch log group names"""
+
+    def __init__(self, client):
+
+        self.webhook_ = {'name': None, 'time': 0}
+        self.invoke_ = {'name': None, 'time': 0}
+        self.batch_ = {'name': None, 'time': 0}
+        self.status_ = {'name': None, 'time': 0}
+
+        self.logs = client.describe_log_groups()['logGroups']
+
+        for desc in self.logs:
+            name = desc['logGroupName']
+            start = desc['creationTime']
+            if name.find('github-HandleWebhookLambda') > -1:
+                if self.webhook_['time'] < start:
+                    self.webhook_ = {'name': name, 'time': start}
+                continue
+            if name.find('github-InvokeBatchLambda') > -1:
+                if self.invoke_['time'] < start:
+                    self.invoke_ = {'name': name, 'time': start}
+                continue
+            if name.find('github-BatchStatusLambda') > -1:
+                if self.status_['time'] < start:
+                    self.status_ = {'name': name, 'time': start}
+                continue
+            if name.find('/aws/batch/job') > -1:
+                if self.batch_['time'] < start:
+                    self.batch_ = {'name': name, 'time': start}
+                continue
+
+    def webhook(self):
+        """Log group for the webhook lambda."""
+        return self.webhook_['name']
+
+    def invoke(self):
+        """Log group for the batch invocation lambda."""
+        return self.invoke_['name']
+
+    def status(self):
+        """Log group for the batch status lambda."""
+        return self.status_['name']
+
+    def batch(self):
+        """Log group for AWS Batch."""
+        return self.batch_['name']
+
+    def log_name(self, log):
+        """Log group for log containing the string log."""
+        for desc in self.logs:
+            name = desc['logGroupName']
+            if name.lower().find(log.lower()) > -1:
+                return name
+        return None
+
+################################################################
+
+class StatusLog:
+    """Manage lambda logs for batch status"""
+
+    def __init__(self, client, loggroupname, starttime, endtime=None):
+
+        self.errors_ = []
+
+        kwargs = {}
+        kwargs['logGroupName'] = loggroupname
+        kwargs['startTime'] = starttime
+        if endtime:
+            kwargs['endTime'] = endtime
+
+        paginator = client.get_paginator('filter_log_events')
+        page_iterator = paginator.paginate(** kwargs)
+
+        events = []
+        print("Reading log events...")
+        for page in page_iterator:
+            events.extend(page['events'])
+            print("Reading log events...")
+        events.sort(key=lambda event: event['timestamp'])
+
+        error_found = False
+        for event in events:
+            msg = event['message'].rstrip()
+            if msg.startswith('Unexpected Verification Result'):
+                error_found = True
+                continue
+            if msg.startswith('Start: Updating GitHub status') and error_found:
+                jobname = msg.split()[-2]
+                jobtime = event['timestamp']
+                self.errors_.append({'name': jobname, 'time': jobtime})
+                error_found = False
+                continue
+
+        self.errors_.sort(key=lambda item: item['time'])
+
+    def errors(self):
+        return self.errors_
+
+################################################################
+
+class InvokeLog:
+    """Manage lambda logs for webhooks."""
+
+    def __init__(self, client, loggroupname, starttime, endtime=None, job=None):
+
+        self.log_ = {}
+        self.job_ = {}
+        self.trigger_ = {}
+        self.tarfile_ = {}
+
+        kwargs = {}
+        kwargs['logGroupName'] = loggroupname
+        kwargs['startTime'] = starttime
+        if endtime:
+            kwargs['endTime'] = endtime
+
+        paginator = client.get_paginator('filter_log_events')
+        page_iterator = paginator.paginate(** kwargs)
+
+        events = []
+        print("Reading log events...")
+        for page in page_iterator:
+            events.extend(page['events'])
+            print("Reading log events...")
+        events.sort(key=lambda event: event['timestamp'])
+
+        current_id = None
+        active_id = False
+
+        for event in events:
+            msg = event['message'].rstrip()
+
+            # Start of ci invocation lambda
+            # Match "START RequestId: ID Version: $LATEST"
+            if msg.startswith('START RequestId:'):
+                current_id = msg.split()[2]
+                self.log_[current_id] = []
+                active_id = True
+
+            # CI invocation aborted: uninterested pull request
+            # Match "Ignoring pull request with action ..."
+            # Match "Ignoring pull request action as base repository matches head"
+            # Match "Ignoring delete-branch push event"
+            if msg.startswith('Ignoring pull request'):
+                self.log_[current_id].append('Ignoring pull request')
+                active_id = False
+            if msg.startswith('Ignoring delete-branch push event'):
+                self.log_[current_id].append('Ignoring push')
+                active_id = False
+
+            # Report of cbmc batch job submission
+            # Match "Launching job JOBNAME:"
+            if msg.startswith('\nLaunching job'):
+                jobname = msg.split()[2][:-1]
+                self.job_[jobname] = current_id
+
+            # Report of triggering action
+            # Match "Pull request: {action} {from_repo} -> {to_repo}"
+            # Match "Push to {}: {}"
+            if msg.startswith('Pull request'):
+                self.trigger_[current_id] = msg
+            if msg.startswith('Push to'):
+                self.trigger_[current_id] = msg
+
+            # Report of tar file
+            # Match "downloading https://api.github.com/.*/tarball/.* to .*
+            if (msg.startswith('downloading https://api.github.com')
+                    and msg.endswith('.tar.gz')):
+                self.tarfile_[current_id] = msg.split()[-1].split('/')[-1]
+
+            # End of ci invocation lambda
+            # Match "END RequestId: ID"
+            if msg.startswith('END RequestId:'):
+                request_id = msg.split()[2]
+                if current_id == request_id: # nested invocation report?
+                    self.log_[current_id].append(msg)
+                    active_id = False
+                    # Stop the search if we've found the job we care about
+                    if job and self.job_.get(job):
+                        return
+
+            if active_id:
+                self.log_[current_id].append(msg)
+
+    def invocation(self, job):
+        return self.log_[self.job_[job]]
+
+    def trigger(self, job):
+        return self.trigger_[self.job_[job]]
+
+    def tarfile(self, job):
+        return self.tarfile_[self.job_[job]]
+
+################################################################
+
+class BatchLog:
+    """Manage AWS Batch logs for CBMC Batch"""
+
+    def __init__(self, client, loggroupname, starttime, endtime=None, task=None):
+
+        self.boot_options_ = {}
+        self.start_time_ = {}
+        self.log_stream_ = {}
+        self.log_ = {}
+
+        kwargs = {}
+        kwargs['logGroupName'] = loggroupname
+        kwargs['startTime'] = starttime
+        if endtime:
+            kwargs['endTime'] = endtime
+
+        paginator = client.get_paginator('filter_log_events')
+        page_iterator = paginator.paginate(** kwargs)
+
+        events = []
+        print("Reading log events...")
+        for page in page_iterator:
+            events.extend(page['events'])
+            print("Reading log events...")
+        events.sort(key=lambda event: (event['logStreamName'], event['timestamp']))
+
+        task_name = None
+        task_found = False
+        for event in events:
+            for msg in event['message'].rstrip().split('\r'):
+                if msg.startswith('Booting with options'):
+                    # Starting the scan of the next AWS Batch job, and
+                    # ending the scan of the prior job.
+
+                    # Stop if the prior job was the job we were looking for.
+                    if task_found:
+                        return
+
+                    boot_json = msg[len('Booting with options'):]
+                    boot_options = json.loads(boot_json)
+                    task_name = boot_options['jobname']
+                    task_found = task == task_name
+
+                    self.boot_options_[task_name] = boot_options
+                    self.start_time_[task_name] = event['timestamp']
+                    self.log_stream_[task_name] = event['logStreamName']
+                    self.log_[task_name] = []
+
+                if task_name:
+                    self.log_[task_name].append(msg)
+
+
+    def boot_options(self, task_name):
+        return self.boot_options_[task_name]
+
+    def start_time(self, task_name):
+        return self.start_time_[task_name]
+
+    def log_stream(self, task_name):
+        return self.log_stream_[task_name]
+
+    def log(self, task_name):
+        return self.log_[task_name]
+
+################################################################
+
+def time_from_iso(timeiso):
+    if timeiso is None:
+        return None
+    lcltime = datetime.fromisoformat(timeiso)
+    gmttime = lcltime.replace(tzinfo=timezone.utc)
+    return int(gmttime.timestamp() * 1000)
+
+def iso_from_time(timems):
+    if timems is None:
+        return None
+    return datetime.utcfromtimestamp(timems // 1000).isoformat()
+
+################################################################
+
+def dump_log(client, group, utcstart, utcend, logname, brief=False):
+    logname = group.log_name(logname)
+    if logname:
+        kwargs = {}
+        kwargs['logGroupName'] = logname
+        kwargs['startTime'] = utcstart
+        if utcend:
+            kwargs['endTime'] = utcend
+
+        paginator = client.get_paginator('filter_log_events')
+        page_iterator = paginator.paginate(** kwargs)
+
+        events = []
+        print("Reading log events...")
+        for page in page_iterator:
+            events.extend(page['events'])
+            print("Reading log events...")
+        events.sort(key=lambda event: event['timestamp'])
+        for event in events:
+            for msg in event['message'].rstrip().split('\r'):
+                if brief:
+                    msg = msg[:80]
+                print(iso_from_time(event['timestamp']), msg)
+
+def dump_batch_status(session, status='FAILED', brief=False):
+        kwargs = {}
+        kwargs['jobQueue'] = 'CBMCJobQueue'
+        kwargs['jobStatus'] = 'FAILED'
+
+        client = session.client('batch')
+        paginator = client.get_paginator('list_jobs')
+        from pprint import pprint
+        pprint(paginator)
+        pprint(kwargs)
+        page_iterator = paginator.paginate(** kwargs)
+
+        events = []
+        print("Reading log events...")
+        for page in page_iterator:
+            events.extend(page['jobSummaryList'])
+            print("Reading log events...")
+
+        events.sort(key=lambda event: event['createdAt'])
+        job_failed = []
+        task_exited = []
+        for event in events:
+            try:
+                jobname = event['jobName']
+                if event.get('container') and event['container'].get('reason'):
+                    error = event['container']['reason']
+                else:
+                    error = event['statusReason']
+                if error == 'Dependent Job failed':
+                    job_failed.append(jobname)
+                    continue
+                if error == 'Essential container in task exited':
+                    task_exited.append(jobname)
+                    continue
+                if brief:
+                    error = error[:80]
+                timestamp = iso_from_time(event['createdAt'])
+            except Exception as e:
+                print('error')
+                pprint(event)
+                raise e
+            print(timestamp, jobname, error)
+        if job_failed:
+            print('Dependent Job failed')
+            for job in job_failed:
+                print('  '+job)
+        if task_exited:
+            print('Essential container in task exited')
+            for job in task_exited:
+                print('  '+job)
+
+################################################################
+
+def scan(args, client):
+    utctime = time_from_iso(args.utc)
+    start = args.interval[0]
+    try:
+        end = args.interval[1]
+    except IndexError:
+        end = None
+    utcstart = utctime - (start * 60 * 1000)
+    utcend = utctime + (end * 60 * 1000) if end else None
+
+    group = LogGroup(client)
+
+    if args.errors:
+        status = StatusLog(client, group.status(), utcstart, utcend)
+        for stat in status.errors():
+            print("{} ({})".format(stat['name'], iso_from_time(stat['time'])))
+
+    if args.webhook:
+        invoke = InvokeLog(client, group.invoke(), utcstart, utcend, args.webhook)
+        print()
+        print("Trigger: {}".format(invoke.trigger(args.webhook)))
+        print("Tarfile: {}".format(invoke.tarfile(args.webhook)))
+        print("Log records: displayed below")
+        print()
+        for line in invoke.invocation(args.webhook):
+            print(line)
+
+    if args.batch:
+        invoke = BatchLog(client, group.batch(), utcstart, utcend, args.batch)
+        print()
+        print("CBMC Task: {}".format(args.batch))
+        print("Start time: {}".format(iso_from_time(invoke.start_time(args.batch))))
+        print("Log stream name: {}".format(invoke.log_stream(args.batch)))
+        print(json.dumps(invoke.boot_options(args.batch), indent=2))
+        print()
+        for line in invoke.log(args.batch):
+            print(line)
+
+    if args.dump:
+        dump_log(client, group, utcstart, utcend, args.dump, args.brief)
+
+def main():
+    args = create_parser().parse_args()
+    session = boto3.session.Session(profile_name=args.profile)
+
+    if args.batch_job_failures:
+        dump_batch_status(session, brief=args.brief)
+        return
+
+    client = session.client('logs')
+    scan(args, client)
+
+if __name__ == '__main__':
+    main()

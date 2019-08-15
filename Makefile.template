@@ -1,0 +1,21 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The S3 bucket used by cbmc-batch for results
+export BUCKET = s3://cbmc
+
+# The S3 bucket used by cbmc-batch for binary packages like cbmc.tar.gz
+export PKGBUCKET = $(BUCKET)/package
+
+# The directory containing the cbmc-batch repository CBMC-batch on gitfarm
+export BATCHDIR = ~/cbmc-batch
+
+# The directory containing the cbmc-viewer repository CBMC-coverage on gitfarm
+export VIEWERDIR = ~/CBMC-coverage
+
+# AWS account id
+export AWSID=723634282280
+
+# AWS docker repository
+export REPO=$(AWSID).dkr.ecr.us-east-1.amazonaws.com/cbmc
+
