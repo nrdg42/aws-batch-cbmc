@@ -1,6 +1,6 @@
-## AWS Batch Cbmc
+## AWS Batch CBMC
 
-AWS-Batch-CBMC is a tool running the CBMC (C Bounded Model Checker) on AWS Batch.
+AWS Batch CBMC makes it easy to run CBMC (the C Bounded Model Checker) on AWS Batch.
 
 ## License
 
