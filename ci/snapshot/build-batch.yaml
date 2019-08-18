@@ -7,11 +7,18 @@ Parameters:
   S3BucketName:
     Type: String
 
-  BatchCodeCommitRepositoryName:
+  GitHubToken:
     Type: String
-    Default: CBMC-batch
 
-  BatchCodeCommitBranchName:
+  BatchRepositoryOwner:
+    Type: String
+    Default: awslabs
+
+  BatchRepositoryName:
+    Type: String
+    Default: aws-batch-cbmc
+
+  BatchRepositoryBranchName:
     Type: String
     Default: master
 
@@ -125,14 +132,6 @@ Resources:
             Version: 2012-10-17
             Statement:
               - Action:
-                  - codecommit:GetBranch
-                  - codecommit:GetCommit
-                  - codecommit:GetUploadArchiveStatus
-                  - codecommit:UploadArchive
-                Effect: Allow
-                Resource:
-                  - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${BatchCodeCommitRepositoryName}"
-              - Action:
                   - codebuild:BatchGetBuilds
                   - codebuild:StartBuild
                 Effect: Allow
@@ -157,12 +156,15 @@ Resources:
             - Name: "Build-Batch-Source-Action"
               ActionTypeId:
                 Category: Source
-                Owner: AWS
-                Provider: CodeCommit
+                Owner: ThirdParty
+                Provider: GitHub
                 Version: 1
               Configuration:
-                RepositoryName: !Ref BatchCodeCommitRepositoryName
-                BranchName: !Ref BatchCodeCommitBranchName
+                Owner: !Ref BatchRepositoryOwner
+                Repo: !Ref BatchRepositoryName
+                Branch: !Ref BatchRepositoryBranchName
+                OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: True
               OutputArtifacts:
                 - Name: "batch-src"
         - Name: "Build"

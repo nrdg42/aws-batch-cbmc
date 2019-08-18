@@ -178,10 +178,12 @@ def deploy_globals(stacks, snapshot, secrets, doit=None, local=False):
            "build-globals.yaml",
            ["GitHubRepository",
             "GitHubBranchName",
-            "BatchCodeCommitRepositoryName",
-            "BatchCodeCommitBranchName",
-            "ViewerCodeCommitRepositoryName",
-            "ViewerCodeCommitBranchName",
+            "BatchRepositoryOwner",
+            "BatchRepositoryName",
+            "BatchRepositoryBranchName",
+            "ViewerRepositoryOwner",
+            "ViewerRepositoryName",
+            "ViewerRepositoryBranchName",
             "S3BucketSuffix"],
            stacks, snapshot, secrets)
 
@@ -192,8 +194,10 @@ def deploy_build_batch(stacks, snapshot, secrets, local=False):
     deploy('build-batch',
            "build-batch.yaml",
            ['S3BucketName',
-            'BatchCodeCommitRepositoryName',
-            'BatchCodeCommitBranchName'],
+            'GitHubToken',
+            'BatchRepositoryOwner',
+            'BatchRepositoryName',
+            'BatchRepositoryBranchName'],
            stacks, snapshot, secrets)
 
 def deploy_build_viewer(stacks, snapshot, secrets, local=False):
@@ -201,8 +205,10 @@ def deploy_build_viewer(stacks, snapshot, secrets, local=False):
     deploy('build-viewer',
            "build-viewer.yaml",
            ['S3BucketName',
-            'ViewerCodeCommitRepositoryName',
-            'ViewerCodeCommitBranchName'],
+            'GitHubToken',
+            'ViewerRepositoryOwner',
+            'ViewerRepositoryName',
+            'ViewerRepositoryBranchName'],
            stacks, snapshot, secrets)
 
 def deploy_build_docker(stacks, snapshot, secrets, local=False):
@@ -210,8 +216,10 @@ def deploy_build_docker(stacks, snapshot, secrets, local=False):
     deploy('build-docker',
            "build-docker.yaml",
            ['S3BucketName',
-            'BatchCodeCommitRepositoryName',
-            'BatchCodeCommitBranchName'],
+            'GitHubToken',
+            'BatchRepositoryOwner',
+            'BatchRepositoryName',
+            'BatchRepositoryBranchName'],
            stacks, snapshot, secrets)
 
 def deploy_build_cbmc_linux(stacks, snapshot, secrets, local=False):

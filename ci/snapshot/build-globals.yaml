@@ -12,21 +12,29 @@ Parameters:
     Type: String
     Default: "master"
 
-  BatchCodeCommitRepositoryName:
+  BatchRepositoryOwner:
     Type: String
-    Default: "CBMC-batch"
+    Default: awslabs
 
-  BatchCodeCommitBranchName:
+  BatchRepositoryName:
     Type: String
-    Default: "master"
+    Default: aws-batch-cbmc
 
-  ViewerCodeCommitRepositoryName:
+  BatchRepositoryBranchName:
     Type: String
-    Default: "CBMC-coverage"
+    Default: master
 
-  ViewerCodeCommitBranchName:
+  ViewerRepositoryOwner:
     Type: String
-    Default: "master"
+    Default: diffblue
+
+  ViewerRepositoryName:
+    Type: String
+    Default: cbmc
+
+  ViewerRepositoryBranchName:
+    Type: String
+    Default: cbmc-viewer
 
   S3BucketSuffix:
     Type: String
@@ -44,49 +52,6 @@ Resources:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
 
-  BatchCodeCommitRepository:
-    Type: AWS::CodeCommit::Repository
-    Properties:
-      RepositoryName: "CBMC-batch"
-      RepositoryDescription: "PicaPica-synchronized copy of gitfarm CBMC-batch"
-
-  ViewerCodeCommitRepository:
-    Type: AWS::CodeCommit::Repository
-    Properties:
-      RepositoryName: "CBMC-coverage"
-      RepositoryDescription: "PicaPica-synchronized copy of gitfarm CBMC-coverage"
-
-  PicaPicaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          Effect: Allow
-          Principal:
-            Service: prod.picapica.aws.internal
-          Action: sts:AssumeRole
-      RoleName: "picapica-role"
-      Policies:
-        - PolicyName: "picapica-policy"
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Action:
-                  - codecommit:GetRepository
-                  - codecommit:GitPush
-                  - codecommit:UpdateDefaultBranch
-                  - picapica:GetDestination
-                  - picapica:PutDestination
-                  - picapica:ListDestinations
-                  - picapica:DeleteDestination
-                Effect: Allow
-                Resource:
-                  - !GetAtt BatchCodeCommitRepository.Arn
-                  - !Sub "arn:aws:picapica:${AWS::Region}:${AWS::AccountId}:/destinations/CBMC-batch"
-                  - !GetAtt ViewerCodeCommitRepository.Arn
-                  - !Sub "arn:aws:picapica:${AWS::Region}:${AWS::AccountId}:/destinations/CBMC-coverage"
-
 Outputs:
   S3BucketName:
     Value: !Ref S3Bucket
@@ -102,25 +67,29 @@ Outputs:
     Export:
       Name: GitHubBranchName
 
-  BatchCodeCommitRepositoryName:
-    Value: !GetAtt BatchCodeCommitRepository.Name
+  BatchRepositoryOwner:
+    Value: !Ref BatchRepositoryOwner
     Export:
-      Name: BatchCodeCommitRepositoryName
-  BatchCodeCommitBranchName:
-    Value: !Ref BatchCodeCommitBranchName
+      Name: BatchRepositoryOwner
+  BatchRepositoryName:
+    Value: !Ref BatchRepositoryName
     Export:
-      Name: BatchCodeCommitBranchName
+      Name: BatchRepositoryName
+  BatchRepositoryBranchName:
+    Value: !Ref BatchRepositoryBranchName
+    Export:
+      Name: BatchRepositoryBranchName
 
-  ViewerCodeCommitRepositoryName:
-    Value: !GetAtt ViewerCodeCommitRepository.Name
+  ViewerRepositoryOwner:
+    Value: !Ref ViewerRepositoryOwner
     Export:
-      Name: ViewerCodeCommitRepositoryName
-  ViewerCodeCommitBranchName:
-    Value: !Ref ViewerCodeCommitBranchName
+      Name: ViewerRepositoryOwner
+  ViewerRepositoryName:
+    Value: !Ref ViewerRepositoryName
     Export:
-      Name: ViewerCodeCommitBranchName
+      Name: ViewerRepositoryName
+  ViewerRepositoryBranchName:
+    Value: !Ref ViewerRepositoryBranchName
+    Export:
+      Name: ViewerRepositoryBranchName
 
-  PicaPicaRoleArn:
-    Value: !GetAtt PicaPicaRole.Arn
-    Export:
-      Name: PicaPicaRoleArn
