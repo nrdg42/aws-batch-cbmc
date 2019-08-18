@@ -267,9 +267,10 @@ def lambda_set_variables(lda, function, variables):
     for key in list(cfg.keys()):
         if key not in LAMBDA_KEYS:
             del cfg[key]
-    for key in list(cfg['VpcConfig'].keys()):
-        if key not in LAMBDA_VPCCONFIG_KEYS:
-            del cfg['VpcConfig'][key]
+    if cfg.get('VpcConfig'):
+        for key in list(cfg['VpcConfig'].keys()):
+            if key not in LAMBDA_VPCCONFIG_KEYS:
+                del cfg['VpcConfig'][key]
     cfg['Environment']['Variables'] = variables
     lda.update_function_configuration(**cfg)
 
