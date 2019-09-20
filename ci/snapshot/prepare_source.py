@@ -220,7 +220,7 @@ def repository_basename(url):
     return repository_name(url).replace('/', '-')
 
 def clone_repository(url, srcdir):
-    cmd = ['git', 'clone', url, srcdir]
+    cmd = ['git', 'clone', '--recursive', url, srcdir]
     run_command(cmd)
 
     # Fetch the pull request data in addtion to the head data that

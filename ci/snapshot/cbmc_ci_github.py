@@ -210,9 +210,20 @@ def parse_pr(body):
     print("Pull request: {action} {from_repo} -> {to_repo} (draft: {d})".format(
         action=action, from_repo=head_repo_name, to_repo=base_repo_name,
         d=draft))
-    if head_sha is not None and head_repo_name == base_repo_name:
-        print("Ignoring pull request action as base repository matches head")
-        return (None, None, None, None, None)
+
+    # This optimization interacts badly with FreeRTOS branch filtering.
+    #
+    # For historical reasons, FreeRTOS CI restricts attention to a small
+    # collection of branches like master, and ignores all github events
+    # except for a push to or a pull request against one of these
+    # branches.  For special case of a pull request pushed directly to the
+    # repository (and not a fork), the branch filtering skips checking the
+    # push and this optimization skips checking the pull request, meaning
+    # nothing gets checked.
+    #
+    # if head_sha is not None and head_repo_name == base_repo_name:
+    #     print("Ignoring pull request action as base repository matches head")
+    #     return (None, None, None, None, None)
 
     return (base_repo_name, base_repo_id, base_repo_branch, head_sha, draft)
 
