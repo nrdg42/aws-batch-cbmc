@@ -1,0 +1,33 @@
+Parameters:
+
+  S3BucketToolsName:
+    Type: String
+    Description: "S3 bucket will be AccountId-Region-S3BucketSuffix"
+
+  ProofAccountIds:
+    Type: CommaDelimitedList
+    Description: "ID numbers of the proof account"
+Resources:
+
+  S3AccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "S3 Bucket access identity"
+
+  TheBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketToolsName
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:ListBucket
+              - s3:GetObject
+            Effect: Allow
+            Resource: [!Join [ "", [ "arn:aws:s3:::", !Ref S3BucketToolsName, "/*" ] ],
+                       !Join [ "", [ "arn:aws:s3:::", !Ref S3BucketToolsName, "" ] ]]
+            Principal:
+              AWS: !Ref ProofAccountIds
+#              AWS: !Sub "arn:aws:iam::${ProofAccountId}:root"
+
