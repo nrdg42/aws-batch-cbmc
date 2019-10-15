@@ -186,7 +186,7 @@ Resources:
             Resource: !Ref SnsCodeBuildTopic
             Condition:
               ArnEquals:
-                "aws:SourceArn": !GetAtt CodeBuildFailureAlarm.Arn
+                "aws:SourceArn": !GetAtt CodeBuildFailedAlarm.Arn
       Topics:
         - !Ref SnsVerificationTopic
 
@@ -233,7 +233,7 @@ Resources:
   SnsCodeBuildSubscription:
     Type: AWS::SNS::Subscription
     Properties:
-      Endpoint: !GetAtt SESCodeBuild.Arn
+      Endpoint: !GetAtt SESLambda.Arn
       Protocol: lambda
       TopicArn: !Ref SnsCodeBuildTopic
 
