@@ -37,7 +37,7 @@ Resources:
       Threshold: 0.0
       TreatMissingData: notBreaching
 
-  CodeBuildFailedAlarm:
+  CodeBuildErrorAlarm:
     DependsOn: SESLambda
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -178,7 +178,7 @@ Resources:
     Properties:
       PolicyDocument:
         Statement:
-          - Sid: "Allow-CodeBuild-Failure-Alarm"
+          - Sid: "Allow-CodeBuild-Error-Alarm"
             Effect: Allow
             Principal:
               AWS: "*"
@@ -186,7 +186,7 @@ Resources:
             Resource: !Ref SnsCodeBuildTopic
             Condition:
               ArnEquals:
-                "aws:SourceArn": !GetAtt CodeBuildFailedAlarm.Arn
+                "aws:SourceArn": !GetAtt CodeBuildErrorAlarm.Arn
       Topics:
         - !Ref SnsVerificationTopic
 
