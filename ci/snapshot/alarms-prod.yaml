@@ -37,6 +37,21 @@ Resources:
       Threshold: 0.0
       TreatMissingData: notBreaching
 
+  CodeBuildErrorAlarm:
+    DependsOn: SESLambda
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref SnsCodeBuildTopic
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: FailedBuilds
+      Namespace: "AWS/CodeBuild"
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0.0
+      TreatMissingData: notBreaching
+
   VerificationErrorAlarm:
     DependsOn: SESLambda
     Type: AWS::CloudWatch::Alarm
@@ -101,6 +116,12 @@ Resources:
       DisplayName: !Sub "${ProjectName} Verification Problem"
       TopicName: "verification-problem"
 
+  SnsCodeBuildTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${ProjectName} Code Build Problem"
+      TopicName: "codebuild-problem"
+
   SnsCanaryTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -152,6 +173,23 @@ Resources:
       Topics:
         - !Ref SnsVerificationTopic
 
+  CodeBuildEventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: "Allow-CodeBuild-Error-Alarm"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sns:Publish
+            Resource: !Ref SnsCodeBuildTopic
+            Condition:
+              ArnEquals:
+                "aws:SourceArn": !GetAtt CodeBuildErrorAlarm.Arn
+      Topics:
+        - !Ref SnsVerificationTopic
+
   CanaryEventTopicPolicy:
     Type: AWS::SNS::TopicPolicy
     Properties:
@@ -191,6 +229,13 @@ Resources:
       Endpoint: !GetAtt SESLambda.Arn
       Protocol: lambda
       TopicArn: !Ref SnsCanaryTopic
+
+  SnsCodeBuildSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt SESLambda.Arn
+      Protocol: lambda
+      TopicArn: !Ref SnsCodeBuildTopic
 
 ################################################################
 # SES: Simple Email Service
@@ -309,6 +354,14 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: sns.amazonaws.com
       SourceArn: !Ref SnsVerificationTopic
+      FunctionName: !GetAtt SESLambda.Arn
+
+  SnsCodeBuildSESLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SnsCodeBuildTopic
       FunctionName: !GetAtt SESLambda.Arn
 
   SnsCanarySESLambdaInvokePermission:
