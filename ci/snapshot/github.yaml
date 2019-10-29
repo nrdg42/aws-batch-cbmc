@@ -7,6 +7,9 @@ Parameters:
   S3BucketToolsName:
     Type: String
 
+  BuildToolsAccountId:
+    Type: String
+
   ProjectName:
     Type: String
 
@@ -59,13 +62,22 @@ Resources:
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
               - Action:
                   - s3:GetObject
-                  - s3:PutObject
                 Effect: Allow
                 Resource: !Join ["/", [!Sub "arn:aws:s3:::${S3BucketToolsName}", "*"]]
               - Action:
                   - s3:ListBucket
                 Effect: Allow
                 Resource: !Sub "arn:aws:s3:::${S3BucketToolsName}"
+
+              - Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Effect: Allow
+                Resource: !Join ["/", [!Sub "${S3BucketProofs.Arn}", "*"]]
+              - Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource: !Sub "${S3BucketProofs.Arn}"
               - Action:
                   - batch:DescribeJobQueues
                   - batch:DescribeJobDefinitions
@@ -120,6 +132,7 @@ Resources:
         Variables:
           PROJECT_NAME: !Ref ProjectName
           S3_BKT: !Ref S3BucketToolsName
+          S3_BUCKET_PROOFS: !Ref S3BucketProofs
           PKG_BKT: !Sub "${S3BucketToolsName}/snapshot/snapshot-${SnapshotID}"
           CBMC_CI_UPDATING_STATUS: True
 
