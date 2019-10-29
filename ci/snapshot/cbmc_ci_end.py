@@ -13,7 +13,7 @@ import boto3
 from cbmc_ci_github import update_status
 
 # S3 Bucket name for storing CBMC Batch packages and outputs
-bkt = os.environ['S3_BKT']
+bkt = os.environ['S3_BUCKET_PROOFS']
 
 def read_from_s3(s3_path):
     """Read from a file in S3 Bucket
