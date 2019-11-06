@@ -22,6 +22,9 @@ export BUILD_TOOLS_AWSID=$(AWSID)
 # Value for MaxVcpus parameter in cloudformation template
 export MAX_VCPUS=16
 
+# AWS Region
+export AWSREGION=us-east-1
+
 # AWS docker repository
-export REPO=$(AWSID).dkr.ecr.us-east-1.amazonaws.com/cbmc
+export REPO=$(AWSID).dkr.ecr.$(AWSREGION).amazonaws.com/cbmc
 

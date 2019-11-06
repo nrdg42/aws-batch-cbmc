@@ -74,7 +74,7 @@ cbmc-patch:
 	for f in $(PATCHDIR)/*; do git apply $$f; done
 
 cbmc-build:
-	make -C $(CBMCGIT)/cbmc/src minisat2-download
+	make DOWNLOADER='wget' -C $(CBMCGIT)/cbmc/src minisat2-download
 	make -C $(CBMCGIT)/cbmc/src CXX=g++-5 -j8
 
 cbmc-tar:

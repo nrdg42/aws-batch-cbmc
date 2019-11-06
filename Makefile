@@ -10,14 +10,14 @@ default:
 	$(MAKE) -C pkg-viewer $@
 	$(MAKE) -C template $@
 
-install:
+install: login
 	$(MAKE) -C docker $@
 	$(MAKE) -C pkg-cbmc $@
 	$(MAKE) -C pkg-batch $@
 	$(MAKE) -C pkg-viewer $@
 	$(MAKE) -C template $@
 
-update:
+update: login
 	$(MAKE) -C docker install
 	$(MAKE) -C pkg-cbmc install
 	$(MAKE) -C pkg-batch install
@@ -36,7 +36,12 @@ clean:
 veryclean: clean
 
 login:
-	aws ecr get-login --no-include-email --region us-east-1
+	@echo Generating ECR login command ...
+	$(eval LOGINCMD = $(shell aws ecr get-login --no-include-email --region $(AWSREGION)))
+	@echo ... done.
+	@test "$(LOGINCMD)" || ( echo "Could not obtain login from AWS ECR"; exit 1 )
+	@echo Executing generated ECR login command
+	$(LOGINCMD)
 
 .PHONY: default install clean veryclean login
 
