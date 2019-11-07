@@ -125,13 +125,22 @@ Many different Proof accounts (Beta, Prod, Development) can share the same Tool 
   are required, and "BatchCodeCommitBranchName" must be set to "snapshot".
   ProjectName cannot contain a space or other "illegal" characters.
 
-* If you are setting up both a tool building account and a proof account, run the following command:
+* If you are setting up both a completely new shared tool building account and a proof account, and the proof account already has read access in the build account's S3 bucket policy, run the following command:
 
         snapshot-update --profile $PROOF-PROFILE --build-profile $BUILD-PROFILE --is-init
 
-* If you are using an existing tool building account, and are setting up a proof account, run the following command:
+* If you are using an existing tool building account, and are setting up a proof account, and the proof account already has read access in the build account's S3 bucket policy, run the following command:
         
         snapshot-update --profile $PROOF-PROFILE --build-profile $BUILD-PROFILE
+
+* If the proof account does not have read access to build account's S3 bucket, add the following flag to either command
+
+        --proof-account-ids ACCOUNT_ID1 ACCOUNT_ID2 ...
+
+**NOTE: You must list every single account that should have read access to the shared account, including ones that already have access. This should be fixed**
+
+Note that the build account must have write access even to the shared build account, because we save a snapshot in the
+shared S3 bucket.
 
 * Create CodeCommit replications of the CBMC-batch and CBMC-coverage
   GitFarm repositories at
