@@ -135,9 +135,10 @@ Many different Proof accounts (Beta, Prod, Development) can share the same Tool 
 
 * If the proof account does not have read access to build account's S3 bucket, add the following flag to either command
 
-        --proof-account-ids ACCOUNT_ID1 ACCOUNT_ID2 ...
+        --proof-account-ids ACCOUNT_ID
 
-**NOTE: You must list every single account that should have read access to the shared account, including ones that already have access. This should be fixed**
+This will add read access for the proof account to the bucket policy of the shared tool account
+
 
 Note that the build account must have write access even to the shared build account, because we save a snapshot in the
 shared S3 bucket.
