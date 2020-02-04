@@ -272,9 +272,22 @@ def merge_repository(sha=None, branch=None, srcdir=None):
 def checkout_repository(sha=None, branch=None, srcdir=None):
     checkout = sha or branch
     if checkout is None:
-        return
+        return False
+
     cmd = ['git', 'checkout', '--recurse-submodules', checkout]
-    run_command(cmd, srcdir)
+    try:
+        run_command(cmd, srcdir)
+        return True
+    except subprocess.CalledProcessError:
+        try:
+            cmd = ['git', 'cat-file', '-e', checkout]
+            run_command(cmd, srcdir)
+            assert False, ("git cat-file shows checkout <%s> as existing, "
+                           "but git checkout failed")
+        except subprocess.CalledProcessError:
+            logging.error("No such commit exists in this repository: <%s>", checkout)
+            return False
+
 
 ################################################################
 
@@ -408,7 +421,13 @@ def source_prepare():
         cbmc_ci_github.update_status("pending", "Proof jobs starting", None, "Status pending", arg.id, arg.sha, False)
         base_name = repository_basename(arg.repository)
         clone_repository(arg.repository, base_name)
-        checkout_repository(arg.sha, arg.branch, base_name)
+
+        if not checkout_repository(arg.sha, arg.branch, base_name):
+            cbmc_ci_github.update_status(
+                "success", "Cancelled", None, "Cancelled by force-pushed commit",
+                arg.id, arg.sha, no_status_metric=True)
+            return
+
         generate_cbmc_makefiles(PROOF_MARKERS, base_name)
         generate_tarfile(arg.tarfile_name, base_name)
         upload_tarfile_to_s3(arg.tarfile_name, arg.bucket_proofs, arg.tarfile_path)
