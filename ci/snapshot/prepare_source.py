@@ -251,7 +251,7 @@ def repository_basename(url):
     return repository_name(url).replace('/', '-')
 
 def clone_repository(url, srcdir):
-    cmd = ['git', 'clone', '--recurse-submodules', url, srcdir]
+    cmd = ['git', 'clone', url, srcdir]
     run_command(cmd)
 
     # Fetch the pull request data in addtion to the head data that
@@ -274,10 +274,12 @@ def checkout_repository(sha=None, branch=None, srcdir=None):
     if checkout is None:
         return False
 
+    cmd = ["git", "submodule", "update", "--init", "--recursive"]
+    run_command(cmd, srcdir)
+
     cmd = ['git', 'checkout', '--recurse-submodules', checkout]
     try:
         run_command(cmd, srcdir)
-        return True
     except subprocess.CalledProcessError:
         try:
             cmd = ['git', 'cat-file', '-e', checkout]
@@ -288,6 +290,9 @@ def checkout_repository(sha=None, branch=None, srcdir=None):
             logging.error("No such commit exists in this repository: <%s>", checkout)
             return False
 
+    cmd = ["git", "submodule", "update", "--init", "--recursive"]
+    run_command(cmd, srcdir)
+    return True
 
 ################################################################
 
