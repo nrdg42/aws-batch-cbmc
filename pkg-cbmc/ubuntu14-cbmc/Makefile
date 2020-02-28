@@ -34,7 +34,13 @@ tarfile:
 		--entrypoint make cbmc:ubuntu14-gcc -C /cbmc cbmc
 
 owner:
-	sudo chown $(shell id -u):$(shell id -g) cbmc.tar.gz
+	$(eval FOWNER = $(shell ls -ld cbmc.tar.gz | awk 'NR==1 {print $$3}' | xargs id -u))
+	$(eval FGROUP = $(shell ls -ld cbmc.tar.gz | awk 'NR==1 {print $$3}' | xargs id -g))
+	$(eval UID = $(shell id -u))
+	$(eval GID = $(shell id -g))
+	[ "$(FOWNER)" = "$(UID)" ] || sudo chown $(UID) cbmc.tar.gz
+	[ "$(FGROUP)" = "$(GID)" ] || chgrp $(GID) cbmc.tar.gz
+	@ls -ld cbmc.tar.gz
 
 install:
 	aws s3 cp cbmc.tar.gz $(PKGBUCKET)/cbmc.tar.gz
