@@ -10,13 +10,15 @@ install:
 	aws cloudformation create-stack \
 		--stack-name cbmc \
 		--template-body file://cbmc.yaml \
-		--capabilities CAPABILITY_IAM
+		--capabilities CAPABILITY_IAM \
+		--parameters ParameterKey=BuildToolsAccountId,ParameterValue=$(BUILD_TOOLS_AWSID)
 
 update:
 	aws cloudformation update-stack \
 		--stack-name cbmc \
 		--template-body file://cbmc.yaml \
-		--capabilities CAPABILITY_IAM
+		--capabilities CAPABILITY_IAM \
+		--parameters ParameterKey=BuildToolsAccountId,ParameterValue=$(BUILD_TOOLS_AWSID)
 
 clean:
 	$(RM) *~
