@@ -11,7 +11,8 @@ BIN=cbmc-viewer
 default:
 	$(RM) -r $(BIN)
 	mkdir $(BIN)
-	cp $(VIEWEROBJ) $(BIN)
+	# Copy files to BIN. Depth is 0 because of the '*' in VIEWEROBJ variable.
+	find $(VIEWEROBJ) -maxdepth 0 -mindepth 0 -type f -not -name '.*' -exec cp -v '{}' $(BIN)/ \;
 	tar fcz $(BIN).tar.gz $(BIN)
 
 install:

@@ -12,7 +12,8 @@ BIN=cbmc-batch
 default:
 	$(RM) -r $(BIN)
 	mkdir $(BIN)
-	cp $(BATCHOBJ) $(BIN)
+	# Copy files to BIN. Depth is 0 because of the '*' in BATCHOBJ variable.
+	find $(BATCHOBJ) -maxdepth 0 -mindepth 0 -type f -not -name '.*' -exec cp -v '{}' $(BIN)/ \;
 	tar fcz $(BIN).tar.gz $(BIN)
 
 install:
