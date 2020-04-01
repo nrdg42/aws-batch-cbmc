@@ -61,6 +61,14 @@ BUILD_TOOLS_PACKAGES = {
     "template": {"extract": True}
 }
 
+
+CLOUDFRONT_CLOUDFORMATION_DATA = {
+    "proof-results-cloudfront": {
+        PARAMETER_KEYS_KEY: ['S3BucketProofs'],
+        TEMPLATE_NAME_KEY: "cloudfront.yaml"
+    }
+}
+
 GLOBALS_CLOUDFORMATION_DATA = {
     "globals": {
         TEMPLATE_NAME_KEY: "build-globals.yaml",
@@ -99,6 +107,7 @@ PROOF_ACCOUNT_GITHUB_CLOUDFORMATION_DATA = {
     "github": {
         TEMPLATE_NAME_KEY: "github.yaml",
         PARAMETER_KEYS_KEY: ['BuildToolsAccountId',
+                             'CloudfrontUrl',
                              'GitHubBranchName',
                              'GitHubRepository',
                              'ProjectName',

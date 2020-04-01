@@ -15,6 +15,8 @@ import clog_writert
 
 # S3 Bucket name for storing CBMC Batch packages and outputs
 bkt = os.environ['S3_BUCKET_PROOFS']
+PROPERTY = "property"
+REPORT = "report"
 
 def read_from_s3(s3_path):
     """Read from a file in S3 Bucket
@@ -38,8 +40,10 @@ class Job_name_info:
             self.is_cbmc_batch_job = False
 
     def is_cbmc_property_job(self):
-        return self.is_cbmc_batch_job and self.type == "property"
+        return self.is_cbmc_batch_job and self.type == PROPERTY
 
+    def is_cbmc_report_job(self):
+        return self.is_cbmc_batch_job and self.type == REPORT
 
     @staticmethod
     def check_job_name(job_name):
@@ -147,6 +151,12 @@ def lambda_handler(event, context):
                         response['status'] = clog_writert.FAILED
                 else:
                     response['status'] = clog_writert.FAILED
+            elif job_name_info.is_cbmc_report_job():
+                job_type = job_name_info.type
+                is_report_job = job_name_info.is_cbmc_report_job()
+                print(f"type: {job_type}, is_cbmc_report_job: {is_report_job}, job name: {job_name}")
+                update_status("success", job_dir, s3_dir, desc, repo_id, sha, is_draft)
+                response['status'] = clog_writert.SUCCEEDED if (status == "SUCCEEDED") else clog_writert.FAILED
             else:
                 response['status'] = clog_writert.SUCCEEDED if (status == "SUCCEEDED") else clog_writert.FAILED
 
