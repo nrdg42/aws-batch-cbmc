@@ -8,7 +8,7 @@ import argparse
 import subprocess
 import logging
 import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import json
 import sys
 import traceback
@@ -446,6 +446,17 @@ def generate_cbmc_jobs(src, repo_id, repo_sha, is_draft, tarfile, logger):
         raise pending_exception
 
 ################################################################
+SECRET_TARGET_GITHUB_PAT_NAME = 'GitHubCommitStatusPAT'
+def format_github_url(url, secret_manager = boto3.client('secretsmanager')):
+    secret = secret_manager.get_secret_value(SecretId=SECRET_TARGET_GITHUB_PAT_NAME)
+    if secret is not None:
+        parsed_url = urlparse(url)
+        #FIXME(fbbotero): Move strings to constants
+        if parsed_url.scheme == 'https':
+            token = str(json.loads(secret['SecretString'])[0]['GitHubPAT'])
+            amended_url = parsed_url._replace(netloc=(token + '@' + parsed_url.hostname))
+            url = urlunparse(amended_url)
+    return url
 
 def source_prepare():
     arg = get_arguments()
@@ -457,7 +468,9 @@ def source_prepare():
         logging.debug(debug_json('invocation', script_data(arg)))
         cbmc_ci_github.update_status("pending", "Proof jobs starting", None, "Status pending", arg.id, arg.sha, False)
         base_name = repository_basename(arg.repository)
-        clone_repository(arg.repository, base_name)
+        # FIXME(fbbotero): Redact token in logs
+        repository_url = format_github_url(arg.repository)
+        clone_repository(repository_url, base_name)
 
         if not checkout_repository(arg.sha, arg.branch, base_name):
             cbmc_ci_github.update_status(
