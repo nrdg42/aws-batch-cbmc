@@ -95,6 +95,7 @@ def lambda_handler(event, context):
             "http",
             "http_dev",
             "release-candidate",
+            "COMMENT_RETRY"  # Dummy branch that indicates this was a retry trigger
         ]
         branch_tail = branch.split('/')[-1]
 

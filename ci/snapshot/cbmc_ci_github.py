@@ -10,6 +10,7 @@ import boto3
 import github
 
 from cbmc_ci_timer import Timer
+CBMC_RETRY_KEYWORDS = ["CBMC_RETRY", "/cbmc run checks"]
 
 def update_github_status(repo_id, sha, status, ctx, desc, jobname, post_url = False):
     kwds = {'state': status,
@@ -26,7 +27,11 @@ def update_github_status(repo_id, sha, status, ctx, desc, jobname, post_url = Fa
         g = github.Github(get_github_personal_access_token())
         print("Updating GitHub as user: {}".format(g.get_user().login))
         print("1-hour rate limit remaining: {}".format(g.rate_limiting[0]))
-        g.get_repo(int(repo_id)).get_commit(sha=sha).create_status(**kwds)
+        repo = g.get_repo(int(repo_id))
+        if "origin/pr/" in sha:
+            pr_num = sha.replace("origin/pr/", "")
+            sha = repo.get_pull(int(pr_num)).head.sha
+        repo.get_commit(sha=sha).create_status(**kwds)
         return
 
     print("Not updating GitHub status")
@@ -225,6 +230,35 @@ def parse_pr(body):
 
     return (base_repo_name, base_repo_id, base_repo_branch, head_sha, draft)
 
+def parse_issue_type(body):
+    """
+    Parse the pull request event body for the base and head branches,
+    and get the repository name, repository id, and branch name for the base
+    branch, and get the sha for the head commit on the head branch.
+
+    event has a format as described here:
+        https://developer.github.com/v3/activity/events/types/#pullrequestevent
+
+    """
+    comment_text = body["comment"]["body"]
+    if comment_text not in CBMC_RETRY_KEYWORDS:
+        # We ignore all events that are not retry keywords
+        return (None, None, None, None, None)
+
+    base_repo_name = body["repository"]["full_name"]
+    base_repo_id = body["repository"]["id"]
+    base_repo_branch = "COMMENT_RETRY"
+    draft = False  # FIXME: We are assuming always not a draft
+    pr_num = body["issue"]["number"]
+    head_sha = f"origin/pr/{pr_num}"
+    return (base_repo_name, base_repo_id, base_repo_branch, head_sha, draft)
+
+
+
+
+
+
+
 def parse_push(body):
     """
     Parse the push event body and get the repository name, repository id,
@@ -271,4 +305,10 @@ def parse_event(event):
         return parse_pr(body)
     if event_type == "push":
         return parse_push(body)
-    raise ValueError("Unexpected event type: {}".format(event_type))
+    if event_type == "issue_comment":
+        return parse_issue_type(body)
+    else:
+        print(f"Unhandled webhook event type: '{event_type}'. Ignoring...")
+        return (None, None, None, None, None)
+
+    # raise ValueError("Unexpected event type: {}".format(event_type))
