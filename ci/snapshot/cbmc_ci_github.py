@@ -5,6 +5,8 @@ import json
 import os
 import tarfile
 import urllib
+import threading
+import time
 
 import boto3
 import github
@@ -47,6 +49,15 @@ def get_github_personal_access_token():
     return str(json.loads(s['SecretString'])[0]['GitHubPAT'])
 
 
+
+def print_heartbeat():
+    cnt = 0
+    while cnt <= 120:
+        cnt += 1
+        print("github update counter: %d" % cnt)
+        time.sleep(1)
+
+
 def update_status(status, ctx, jobname, desc, repo_id, sha, no_status_metric, post_url = False):
     """Update GitHub Status
 
@@ -54,6 +65,9 @@ def update_status(status, ctx, jobname, desc, repo_id, sha, no_status_metric, po
     https://developer.github.com/v3/repos/statuses/#create-a-status
     http://pygithub.readthedocs.io/en/latest/github_objects/Commit.html
     """
+    heartbeat = threading.Thread(
+        target=print_heartbeat)
+    heartbeat.start()
 
     #pylint: disable=too-many-arguments
 
@@ -82,7 +96,9 @@ def update_status(status, ctx, jobname, desc, repo_id, sha, no_status_metric, po
     timer = Timer("Updating GitHub status {} with description {}".format(
         status, desc))
     try:
+        print("github update start")
         update_github_status(repo_id, sha, status, ctx, desc, jobname, post_url=post_url)
+        print("github update complete")
         cloudwatch.put_metric_data(
             MetricData=[
                 {
