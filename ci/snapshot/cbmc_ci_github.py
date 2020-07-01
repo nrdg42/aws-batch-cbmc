@@ -5,48 +5,38 @@ import json
 import os
 import tarfile
 import urllib
-from datetime import datetime
 
 import boto3
 import github
-import requests
 
 from cbmc_ci_timer import Timer
 CBMC_RETRY_KEYWORDS = ["CBMC_RETRY", "/cbmc run checks"]
 
 def update_github_status(repo_id, sha, status, ctx, desc, jobname, post_url = False):
-    now = datetime.now()
-    print(f"Trying to reach google: {now}")
-    requests.get("http://www.google.com")
-    end_time = datetime.now()
-    delta = end_time - now
-    print(f"Pinging google took {delta.total_seconds()}")
-    if delta.total_seconds() > 5:
-        print("LONG WAIT")
+    target_url = None
 
-    kwds = {'state': status,
-            'context': "CBMC Batch: " + ctx,
-            'description': desc}
     if jobname and post_url:
         cloudfront_url = os.environ['CLOUDFRONT_URL']
-        kwds['target_url'] = (f"https://{cloudfront_url}/{jobname}/out/html/index.html")
+        target_url = (f"https://{cloudfront_url}/{jobname}/out/html/index.html")
 
     updating = os.environ.get('CBMC_CI_UPDATING_STATUS')
+    queue_url = os.environ.get("GITHUB_QUEUE_URL")
     if updating and updating.strip().lower() == 'true':
-        print("Updating GitHub status")
-        print(json.dumps(kwds, indent=2))
-        g = github.Github(get_github_personal_access_token())
-        print("Updating GitHub as user: {}".format(g.get_user().login))
-        print("1-hour rate limit remaining: {}".format(g.rate_limiting[0]))
-        repo = g.get_repo(int(repo_id))
-        if "origin/pr/" in sha:
-            pr_num = sha.replace("origin/pr/", "")
-            sha = repo.get_pull(int(pr_num)).head.sha
-        repo.get_commit(sha=sha).create_status(**kwds)
+        update_github_msg = {
+            "repo_id": repo_id,
+            "oath": get_github_personal_access_token(),
+            "commit": sha,
+            "status": status,
+            "context": "CBMC Batch: " + ctx,
+            "description": desc,
+            "cloudfront_url": target_url
+        }
+        sqs = boto3.client("sqs")
+        print(f"Sending a message to the Github worker queue: {json.dumps(update_github_msg, indent=2)}")
+        sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(update_github_msg), MessageGroupId=sha)
         return
 
     print("Not updating GitHub status")
-    print(json.dumps(kwds, indent=2))
 
 def get_github_personal_access_token():
     """
@@ -57,6 +47,7 @@ def get_github_personal_access_token():
     s = sm.get_secret_value(SecretId='GitHubCommitStatusPAT')
     return str(json.loads(s['SecretString'])[0]['GitHubPAT'])
 
+
 def update_status(status, ctx, jobname, desc, repo_id, sha, no_status_metric, post_url = False):
     """Update GitHub Status
 
@@ -64,6 +55,7 @@ def update_status(status, ctx, jobname, desc, repo_id, sha, no_status_metric, po
     https://developer.github.com/v3/repos/statuses/#create-a-status
     http://pygithub.readthedocs.io/en/latest/github_objects/Commit.html
     """
+
     #pylint: disable=too-many-arguments
 
     region = os.environ['AWS_REGION']
@@ -91,9 +83,7 @@ def update_status(status, ctx, jobname, desc, repo_id, sha, no_status_metric, po
     timer = Timer("Updating GitHub status {} with description {}".format(
         status, desc))
     try:
-        print("github update start")
         update_github_status(repo_id, sha, status, ctx, desc, jobname, post_url=post_url)
-        print("github update complete")
         cloudwatch.put_metric_data(
             MetricData=[
                 {
