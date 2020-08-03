@@ -34,6 +34,8 @@ RUN apt-get -y update && \
     python3-future \
     python3-pip \
     python3-setuptools \
+    locales \
+    locales-all \
     wget
 
 # install libssl-dev for encryption SDK
@@ -53,6 +55,14 @@ RUN apt-get -y --purge remove \
     python3-pip \
     python3-setuptools \
     && apt-get -y autoremove && apt-get clean
+
+# Set default encoding to UTF-8. Otherwise files are can be encoded incorrectly leading to CBMC Viewer failures
+RUN locale-gen en_US.UTF-8
+RUN sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
+    locale-gen
+ENV LC_ALL en_US.UTF-8
+ENV LANG en_US.UTF-8
+ENV LANGUAGE en_US:en
 
 ADD bin /cbmc-batch-boot
 
