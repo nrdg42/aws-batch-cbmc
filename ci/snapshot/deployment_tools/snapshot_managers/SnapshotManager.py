@@ -31,6 +31,8 @@ CBMC_VIEWER_CONST = "cbmc-viewer"
 CBMC_VIEWER_TAR = "cbmc-viewer.tar.gz"
 SNAPSHOT_TMP_FILENAME = "snapshot_tmp.json"
 
+IMAGE_TAG_SUFFIX = "ImageTagSuffix"
+
 class SnapshotManager:
     """
     This is the class that manages any kind of snapshot of an account and handles saving those snapshots
@@ -143,10 +145,6 @@ class SnapshotManager:
         with open(image_file, "w") as f:
             f.write(json.dumps(package_filenames))
 
-    def _get_most_recent_cbmc_image(self):
-        image_name = self.ecr.list_images(repositoryName=CBMC_REPO_NAME)[IMAGE_IDS_KEY][0][IMAGE_TAG_KEY]
-        return remove_substring(image_name, UBUNTU_IMAGE_PREFIX)
-
     def _rename_package_tar(self, package_name, package_filename):
         current_dir = os.getcwd()
         os.chdir(self.local_snapshot_dir)
@@ -185,9 +183,8 @@ class SnapshotManager:
                 self._extract_package(downloaded_pkg)
             self._rename_package_tar(package, downloaded_pkg)
 
-        #TODO In the future we may want this to be more general
-        image_tag_suffix = self._get_most_recent_cbmc_image()
-        package_filenames["ImageTagSuffix"] = "-{}".format(image_tag_suffix)
+        if overrides and IMAGE_TAG_SUFFIX in overrides:
+            package_filenames[IMAGE_TAG_SUFFIX] = overrides[IMAGE_TAG_SUFFIX]
 
         self._generate_snapshot_file(package_filenames)
         self._upload_template_package()
