@@ -14,10 +14,13 @@ export BATCHDIR = ~/cbmc-batch
 export VIEWERDIR = ~/CBMC-coverage
 
 # AWS account id
-export AWSID=723634282280
+export AWSID=999999999999
 
 # Build Tools accout id for cloudformation template
 export BUILD_TOOLS_AWSID=$(AWSID)
+
+# Value for MaxVcpus parameter in cloudformation template
+export MAX_VCPUS=16
 
 # AWS docker repository
 export REPO=$(AWSID).dkr.ecr.us-east-1.amazonaws.com/cbmc
