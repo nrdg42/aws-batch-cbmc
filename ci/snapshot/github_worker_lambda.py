@@ -31,7 +31,7 @@ class Sqs:
             ]
         )
     def receive_message(self):
-        return self.queue.receive_messages(MaxNumberOfMessages=10)
+        return self.queue.receive_messages(MaxNumberOfMessages=10, AttributeNames=["ApproximateReceiveCount"])
 
 def lambda_handler(event, request):
     sqs = Sqs(queue_name=queue_name)
@@ -59,14 +59,19 @@ def lambda_handler(event, request):
             cloudfront_url = github_msg["cloudfront_url"] if "cloudfront_url" in github_msg else None
             commit_sha = github_msg["commit"] if "commit" in github_msg else None
             pull_request = github_msg["pr"] if "pr" in github_msg else None
+            message_receive_count = int(m.get("ApproximateReceiveCount"))
+            print(f"Approximate Receive Count: {message_receive_count}")
             try:
                 g.update_status(status=github_msg["status"], proof_name=github_msg["context"], commit_sha=commit_sha,
                                 pull_request=pull_request, cloudfront_url=cloudfront_url, description=github_msg["description"])
                 sqs.delete_message(m)
             except UnknownObjectException:
                 print(f"Github returned 404 for message {json.dumps(github_msg, indent=2)}")
-                print("Deleting message from queue")
-                sqs.delete_message(m)
+                if message_receive_count > 3:
+                    print("Deleting message from queue")
+                    sqs.delete_message(m)
+                else:
+                    print("Leaving on Queue")
                 traceback.print_exc()
             except GithubException:
                 print(f"ERROR: Failed to send message: {json.dumps(github_msg, indent=2)}")
