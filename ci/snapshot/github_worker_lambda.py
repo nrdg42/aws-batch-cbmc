@@ -31,7 +31,7 @@ class Sqs:
             ]
         )
     def receive_message(self):
-        return self.queue.receive_messages(MaxNumberOfMessages=10)
+        return self.queue.receive_messages(MaxNumberOfMessages=10, AttributeNames=["ApproximateReceiveCount"])
 
 def lambda_handler(event, request):
     sqs = Sqs(queue_name=queue_name)
@@ -65,8 +65,12 @@ def lambda_handler(event, request):
                 sqs.delete_message(m)
             except UnknownObjectException:
                 print(f"Github returned 404 for message {json.dumps(github_msg, indent=2)}")
-                print("Deleting message from queue")
-                sqs.delete_message(m)
+                print(f"Approximate Receive Count: {m.get('ApproximateReceiveCount')}")
+                if int(m.get("ApproximateReceiveCount")) > 3:
+                    print("Deleting message from queue")
+                    sqs.delete_message(m)
+                else:
+                    print("Leaving on Queue")
                 traceback.print_exc()
             except GithubException:
                 print(f"ERROR: Failed to send message: {json.dumps(github_msg, indent=2)}")
