@@ -59,13 +59,13 @@ def lambda_handler(event, request):
             cloudfront_url = github_msg["cloudfront_url"] if "cloudfront_url" in github_msg else None
             commit_sha = github_msg["commit"] if "commit" in github_msg else None
             pull_request = github_msg["pr"] if "pr" in github_msg else None
+            print(f"Approximate Receive Count: {m.get('ApproximateReceiveCount')}")
             try:
                 g.update_status(status=github_msg["status"], proof_name=github_msg["context"], commit_sha=commit_sha,
                                 pull_request=pull_request, cloudfront_url=cloudfront_url, description=github_msg["description"])
                 sqs.delete_message(m)
             except UnknownObjectException:
                 print(f"Github returned 404 for message {json.dumps(github_msg, indent=2)}")
-                print(f"Approximate Receive Count: {m.get('ApproximateReceiveCount')}")
                 if int(m.get("ApproximateReceiveCount")) > 3:
                     print("Deleting message from queue")
                     sqs.delete_message(m)
