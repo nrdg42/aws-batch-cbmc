@@ -59,7 +59,7 @@ def lambda_handler(event, request):
             cloudfront_url = github_msg["cloudfront_url"] if "cloudfront_url" in github_msg else None
             commit_sha = github_msg["commit"] if "commit" in github_msg else None
             pull_request = github_msg["pr"] if "pr" in github_msg else None
-            message_receive_count = int(m.get("ApproximateReceiveCount"))
+            message_receive_count = int(m.attributes.get("ApproximateReceiveCount"))
             print(f"Approximate Receive Count: {message_receive_count}")
             try:
                 g.update_status(status=github_msg["status"], proof_name=github_msg["context"], commit_sha=commit_sha,
