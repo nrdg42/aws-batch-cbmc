@@ -40,8 +40,9 @@ login:
 	$(eval LOGINPWD = $(shell aws ecr get-login-password --region $(AWSREGION)))
 	@echo ... done.
 	@test "$(LOGINPWD)" || ( echo "Could not obtain login from AWS ECR"; exit 1 )
-	@echo Attempting login to ECR
+	@echo Logging into ECR ...
 	@echo $(LOGINPWD) | docker login --username AWS --password-stdin $(AWSID).dkr.ecr.$(AWSREGION).amazonaws.com
+	@echo ... done.
 
 .PHONY: default install clean veryclean login
 
