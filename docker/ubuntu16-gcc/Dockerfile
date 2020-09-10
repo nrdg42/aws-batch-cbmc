@@ -39,10 +39,7 @@ RUN apt-get -y update && \
     locales-all \
     wget
 
-# Python dependencies of awscli
-RUN apt-get -y install --no-install-recommends \
-    libpython-dev libpython3-dev python-dev python3-dev \
-    python-wheel python3-wheel
+RUN apt-get -y install --no-install-recommends python-wheel python3-wheel
 
 # install libssl-dev for encryption SDK
 # install cmake, openssl, libssl-dev for MQTT
@@ -58,8 +55,10 @@ RUN pip install --upgrade awscli && \
 RUN apt-get -y --purge remove \
     python-pip \
     python-setuptools \
+    python-wheel \
     python3-pip \
     python3-setuptools \
+    python3-wheel \
     && apt-get -y autoremove && apt-get clean
 
 # Set default encoding to UTF-8. Otherwise files are can be encoded incorrectly leading to CBMC Viewer failures
