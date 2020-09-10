@@ -42,5 +42,5 @@ login:
 		--password-stdin \
 		$(AWSID).dkr.ecr.$(AWSREGION).amazonaws.com
 
-.PHONY: default install clean veryclean login loginpwd
+.PHONY: default install clean veryclean login
 
