@@ -8,6 +8,8 @@ FROM ubuntu:16.04
 # Installing default-jdk to get javacc to build cbmc (java component)
 # Installing emacs24-bin-common to get etags (try etags with ctags pkg)
 # Installing bc for Annapurna stage1 Makefile
+# Installing Python pip, setuptools and wheel for awscli & boto3
+#       pip installs of awscli, boto3 and pyyaml build wheel packages
 
 ENV DEBIAN_FRONTEND noninteractive
 ARG UBUNTU_ARCHIVE
@@ -31,15 +33,15 @@ RUN apt-get -y update && \
     python-future \
     python-pip \
     python-setuptools \
+    python-wheel \
     python3 \
     python3-future \
     python3-pip \
     python3-setuptools \
+    python3-wheel \
     locales \
     locales-all \
     wget
-
-RUN apt-get -y install --no-install-recommends python-wheel python3-wheel
 
 # install libssl-dev for encryption SDK
 # install cmake, openssl, libssl-dev for MQTT
