@@ -8,8 +8,7 @@ FROM ubuntu:16.04
 # Installing default-jdk to get javacc to build cbmc (java component)
 # Installing emacs24-bin-common to get etags (try etags with ctags pkg)
 # Installing bc for Annapurna stage1 Makefile
-# Installing Python pip, setuptools and wheel for awscli & boto3
-#       pip installs of awscli, boto3 and pyyaml build wheel packages
+ADD bin /cbmc-batch-boot
 
 ENV DEBIAN_FRONTEND noninteractive
 ARG UBUNTU_ARCHIVE
@@ -41,18 +40,26 @@ RUN apt-get -y update && \
     python3-wheel \
     locales \
     locales-all \
-    wget
+    wget build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev ninja-build gnuplot
 
 # install libssl-dev for encryption SDK
 # install cmake, openssl, libssl-dev for MQTT
 RUN apt-get -y install --no-install-recommends cmake openssl libssl-dev
+
+RUN wget https://www.python.org/ftp/python/3.7.2/Python-3.7.2.tar.xz &&  tar -xf Python-3.7.2.tar.xz
+RUN cd Python-3.7.2 && ./configure && make -j 20 build_all && make install
+RUN pip3.7 install voluptuous jinja2
+RUN rm /usr/bin/python3 &&  ln  /usr/local/bin/python3.7  /usr/bin/python3
+
 
 # Install the latest version of pip; however, do not use pip install --upgrade pip here
 # Install awscli and boto3 with pip and not apt-get (want python 2.7 version)
 RUN pip install --upgrade awscli && \
     pip install --upgrade boto3 && \
     pip3 install --upgrade awscli && \
-    pip3 install --upgrade boto3
+    pip3 install --upgrade boto3 && \
+    pip3.7 install --upgrade awscli && \
+    pip3.7 install --upgrade boto3
 
 RUN apt-get -y --purge remove \
     python-pip \
@@ -71,7 +78,6 @@ ENV LC_ALL en_US.UTF-8
 ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US:en
 
-ADD bin /cbmc-batch-boot
 
 ENV PATH "$PATH:/cbmc"
 ENV PATH "$PATH:/cbmc-viewer"
