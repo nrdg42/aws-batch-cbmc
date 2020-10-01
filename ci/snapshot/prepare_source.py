@@ -236,6 +236,7 @@ def run_command(cmd, cwd=None):
     debug = subprocess_data(cmd, cwd, result.stdout, result.stderr)
     logging.info(debug_json('subprocess', debug))
     result.check_returncode()
+    return result
 
 ################################################################
 # github
@@ -341,6 +342,17 @@ def find_proof_groups(group_names, root='.'):
             if any([path.endswith(os.path.sep + suffix)
                     for suffix in group_names])]
 
+def is_proof_directory(dir, files):
+    if YAML_NAME not in files:
+        return False
+    # The git command returns an empty string if we are in the parent project. 
+    # The name of the parent project is returned if the directory is part of a submodule
+    cmd = ['git', 'rev-parse', '--show-superproject-working-tree']
+    result = run_command(cmd, dir)
+    is_submodule = bool(result.stdout.decode().strip())
+    # Do not run proofs in submodules
+    return not is_submodule
+
 def find_proof_directories(groupdir, relative=True):
     """Find CBMC proof directories under a proof group directory groupdir.
 
@@ -352,7 +364,7 @@ def find_proof_directories(groupdir, relative=True):
     prefix_length = len(groupdir)+1 if relative else 0
     return [dir[prefix_length:]
             for dir, _, files in os.walk(groupdir)
-            if YAML_NAME in files]
+            if is_proof_directory(dir, files)]
 
 def find_proofs(group_names, root='.'):
     """Return (proof-group, proof-directory) pairs for CBMC proofs under root.
