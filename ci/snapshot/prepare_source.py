@@ -346,7 +346,7 @@ def find_proof_groups(group_names, root='.'):
 
     return [path
             for path, _, _ in os.walk(root)
-            if any([path.endswith(os.path.sep + suffix) and not is_in_a_submodule(dir)
+            if any([path.endswith(os.path.sep + suffix) and not is_in_a_submodule(path)
                     for suffix in group_names])]
 
 def find_proof_directories(groupdir, relative=True):
